@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import unicodedata
 from pathlib import Path
+from io import BytesIO
 
 st.set_page_config(page_title="Indicadores Financeiros", layout="wide")
 
@@ -274,6 +275,85 @@ def mostrar_drill_ajustes_aplicacoes(confirmadas, periodos):
         st.dataframe(det, use_container_width=True, hide_index=True)
 
 
+
+
+def gerar_pdf_dashboard(titulo, subtitulo, kpis, tabela_df):
+    """Gera um PDF simples com KPIs e a tabela principal do dashboard."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.units import cm
+    except Exception as e:
+        st.error("Para exportar PDF, inclua reportlab no requirements.txt e faça o redeploy do app.")
+        return None
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=0.7*cm,
+        leftMargin=0.7*cm,
+        topMargin=0.7*cm,
+        bottomMargin=0.7*cm,
+    )
+    styles = getSampleStyleSheet()
+    story = []
+    story.append(Paragraph(f"<b>{titulo}</b>", styles["Title"]))
+    story.append(Paragraph(subtitulo, styles["Normal"]))
+    story.append(Spacer(1, 0.25*cm))
+
+    if kpis:
+        kpi_data = [[str(k), str(v)] for k, v in kpis.items()]
+        kpi_table = Table(kpi_data, colWidths=[6*cm, 5*cm])
+        kpi_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EAF2FF")),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(kpi_table)
+        story.append(Spacer(1, 0.35*cm))
+
+    tabela_pdf = tabela_df.copy().astype(str)
+    max_cols = 10
+    if len(tabela_pdf.columns) > max_cols:
+        tabela_pdf = tabela_pdf.iloc[:, :max_cols]
+        story.append(Paragraph("Tabela reduzida no PDF para manter legibilidade. Use o dashboard para ver todos os meses.", styles["Italic"]))
+        story.append(Spacer(1, 0.15*cm))
+
+    data = [list(tabela_pdf.columns)] + tabela_pdf.values.tolist()
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B5ED7")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(table)
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def botao_pdf_dashboard(nome_arquivo, titulo, subtitulo, kpis, tabela_df, key):
+    pdf_bytes = gerar_pdf_dashboard(titulo, subtitulo, kpis, tabela_df)
+    if pdf_bytes:
+        st.download_button(
+            label="Exportar PDF do Dashboard",
+            data=pdf_bytes,
+            file_name=nome_arquivo,
+            mime="application/pdf",
+            key=key,
+            use_container_width=False,
+        )
+
 # ============================================================
 # INTERFACE / LEITURA
 # ============================================================
@@ -474,10 +554,36 @@ if pagina == "DRE":
         linha_resultado += [resultado, (resultado / receita_val * 100) if receita_val else 0]
     linhas.append(linha_resultado)
 
+    receita_total = sum(receita_por_periodo.values())
+    cmv_total = sum(cmv_por_periodo.values())
+    margem_bruta_total = receita_total - cmv_total
+    resultado_total = sum(linha_resultado[i] for i in range(1, len(linha_resultado), 2))
+    margem_bruta_pct = margem_bruta_total / receita_total * 100 if receita_total else 0
+    resultado_pct = resultado_total / receita_total * 100 if receita_total else 0
+
+    st.subheader("KPIs acumulados do período selecionado")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Receita acumulada", moeda(receita_total))
+    k2.metric("CMV acumulado", moeda(cmv_total))
+    k3.metric("Margem Bruta", moeda(margem_bruta_total), perc(margem_bruta_pct))
+    k4.metric("Resultado DRE", moeda(resultado_total), perc(resultado_pct))
+
     dre_formatada = formatar_tabela_valor_percentual(tabela_mes_percentual(linhas, periodos))
+    botao_pdf_dashboard(
+        "dashboard_dre.pdf",
+        "Dashboard DRE Gerencial",
+        f"Período selecionado: {', '.join(periodos)}",
+        {
+            "Receita acumulada": moeda(receita_total),
+            "CMV acumulado": moeda(cmv_total),
+            "Margem Bruta": f"{moeda(margem_bruta_total)} | {perc(margem_bruta_pct)}",
+            "Resultado DRE": f"{moeda(resultado_total)} | {perc(resultado_pct)}",
+        },
+        dre_formatada,
+        key="pdf_dre"
+    )
     st.dataframe(estilizar_tabela_principal(dre_formatada, linhas_azuis=["RECEITA"], linhas_resultado=["RESULTADO"]), use_container_width=True, hide_index=True)
 
-    receita_total = receita_cmv_periodo["RECEITA"].sum()
     st.subheader("Treemap de Despesas - DRE")
     treemap_despesas(confirmadas_periodo, ordem_dre, "Composição das despesas e % sobre Receita", receita_total, "a Receita")
 
@@ -540,10 +646,32 @@ elif pagina == "DFC":
         linha_resultado += [resultado, (resultado / receb * 100) if receb else 0]
     linhas.append(linha_resultado)
 
+    receb_total = sum(receb_por_periodo.values())
+    saidas_total = sum(sum(despesas_por_conta[c].values()) for c in ordem_dfc)
+    resultado_caixa_total = receb_total - saidas_total
+    resultado_caixa_pct = resultado_caixa_total / receb_total * 100 if receb_total else 0
+
+    st.subheader("KPIs acumulados do período selecionado")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Recebimento acumulado", moeda(receb_total))
+    k2.metric("Saídas acumuladas", moeda(saidas_total))
+    k3.metric("Resultado Caixa", moeda(resultado_caixa_total), perc(resultado_caixa_pct))
+
     dfc_formatada = formatar_tabela_valor_percentual(tabela_mes_percentual(linhas, periodos))
+    botao_pdf_dashboard(
+        "dashboard_dfc.pdf",
+        "Dashboard DFC Gerencial",
+        f"Período selecionado: {', '.join(periodos)}",
+        {
+            "Recebimento acumulado": moeda(receb_total),
+            "Saídas acumuladas": moeda(saidas_total),
+            "Resultado Caixa": f"{moeda(resultado_caixa_total)} | {perc(resultado_caixa_pct)}",
+        },
+        dfc_formatada,
+        key="pdf_dfc"
+    )
     st.dataframe(estilizar_tabela_principal(dfc_formatada, linhas_azuis=["RECEBIMENTO"], linhas_resultado=["RESULTADO CAIXA"]), use_container_width=True, hide_index=True)
 
-    receb_total = recebimentos_periodo_df["RECEBIMENTO"].sum()
     st.subheader("Treemap de Despesas - DFC")
     treemap_despesas(confirmadas_periodo, ordem_dfc, "Composição das saídas e % sobre Recebimento", receb_total, "o Recebimento")
 
@@ -554,9 +682,9 @@ elif pagina == "DFC":
 
     st.subheader("Observações")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Títulos atrasados", len(atrasadas))
-    c2.metric("Valor atrasado", moeda(atrasadas["Valor total"].sum()))
-    c3.metric("Planos sem classificação", sem_classificacao["Plano de contas"].nunique())
+    c1.metric("Títulos atrasados", len(atrasadas_periodo))
+    c2.metric("Valor atrasado", moeda(atrasadas_periodo["Valor total"].sum()))
+    c3.metric("Planos sem classificação", sem_classificacao_periodo["Plano de contas"].nunique())
     with st.expander("Ver drill dos títulos atrasados", expanded=False):
         mostrar_drill_atrasados(atrasadas_periodo)
 
@@ -721,6 +849,19 @@ elif pagina == "Ponto de Equilíbrio":
     pe_fmt["% sobre necessidade"] = pe_fmt["% sobre necessidade"].apply(perc)
 
     st.subheader("Média mensal por Conta de Resultado")
+    botao_pdf_dashboard(
+        "dashboard_ponto_equilibrio.pdf",
+        "Dashboard Ponto de Equilíbrio",
+        f"Período selecionado: {', '.join(periodos_pe)}",
+        {
+            "Meses selecionados": qtd_meses,
+            "Necessidade de Caixa mês": moeda(necessidade_mes),
+            "Necessidade de Caixa semana": moeda(necessidade_semana),
+            "Necessidade de Caixa dia": moeda(necessidade_dia),
+        },
+        pe_fmt,
+        key="pdf_pe"
+    )
     st.dataframe(pe_fmt, use_container_width=True, hide_index=True)
 
     fig = px.treemap(
