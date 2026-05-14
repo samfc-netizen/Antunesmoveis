@@ -407,6 +407,31 @@ recebimentos["RECEBIMENTO"] = converter_numero_br(recebimentos[col_recebimento])
 periodos = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna())))
 periodos = [p for p in periodos if p and p != "/"]
 
+# ============================================================
+# FILTRO GLOBAL DE PERÍODO
+# Esse filtro conversa com DRE, DFC, Observações e Ponto de Equilíbrio.
+# ============================================================
+
+st.sidebar.subheader("Filtro de Período")
+periodos_filtrados = st.sidebar.multiselect(
+    "Selecione os meses",
+    options=periodos,
+    default=periodos,
+    help="Esse filtro altera DRE, DFC, Observações e Ponto de Equilíbrio."
+)
+
+if not periodos_filtrados:
+    st.warning("Selecione pelo menos um mês no filtro lateral.")
+    st.stop()
+
+periodos = ordenar_periodos(periodos_filtrados)
+
+confirmadas_periodo = confirmadas[confirmadas["PERIODO"].isin(periodos)].copy()
+atrasadas_periodo = atrasadas[atrasadas["PERIODO"].isin(periodos)].copy()
+sem_classificacao_periodo = sem_classificacao[sem_classificacao["PERIODO"].isin(periodos)].copy()
+receita_cmv_periodo = receita_cmv[receita_cmv["PERIODO"].isin(periodos)].copy()
+recebimentos_periodo_df = recebimentos[recebimentos["PERIODO"].isin(periodos)].copy()
+
 pagina = st.sidebar.radio("Multipages", ["DRE", "DFC", "Projetos", "Ponto de Equilíbrio"])
 
 # ============================================================
@@ -424,8 +449,8 @@ if pagina == "DRE":
     receita_por_periodo, cmv_por_periodo, despesas_por_conta = {}, {}, {}
 
     for p in periodos:
-        r = receita_cmv.loc[receita_cmv["PERIODO"] == p, "RECEITA"].sum()
-        c = receita_cmv.loc[receita_cmv["PERIODO"] == p, "CMV"].sum()
+        r = receita_cmv_periodo.loc[receita_cmv_periodo["PERIODO"] == p, "RECEITA"].sum()
+        c = receita_cmv_periodo.loc[receita_cmv_periodo["PERIODO"] == p, "CMV"].sum()
         receita_por_periodo[p], cmv_por_periodo[p] = r, c
         linha_receita += [r, 100 if r else 0]
         linha_cmv += [c, (c / r * 100) if r else 0]
@@ -435,7 +460,7 @@ if pagina == "DRE":
     for conta in ordem_dre:
         linha, total_conta_periodos = [conta], {}
         for p in periodos:
-            valor = confirmadas[(confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) & (confirmadas["PERIODO"] == p)]["Valor total"].sum()
+            valor = confirmadas_periodo[(confirmadas_periodo["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) & (confirmadas_periodo["PERIODO"] == p)]["Valor total"].sum()
             total_conta_periodos[p] = valor
             r = receita_por_periodo.get(p, 0)
             linha += [valor, (valor / r * 100) if r else 0]
@@ -452,29 +477,32 @@ if pagina == "DRE":
     dre_formatada = formatar_tabela_valor_percentual(tabela_mes_percentual(linhas, periodos))
     st.dataframe(estilizar_tabela_principal(dre_formatada, linhas_azuis=["RECEITA"], linhas_resultado=["RESULTADO"]), use_container_width=True, hide_index=True)
 
-    receita_total = receita_cmv["RECEITA"].sum()
+    receita_total = receita_cmv_periodo["RECEITA"].sum()
     st.subheader("Treemap de Despesas - DRE")
-    treemap_despesas(confirmadas, ordem_dre, "Composição das despesas e % sobre Receita", receita_total, "a Receita")
+    treemap_despesas(confirmadas_periodo, ordem_dre, "Composição das despesas e % sobre Receita", receita_total, "a Receita")
 
     st.subheader("Drill por Conta de Resultado")
     conta_sel = st.selectbox("Selecione a conta de resultado", ordem_dre, key="dre_conta")
-    mostrar_kpi_conta(confirmadas, conta_sel, receita_total, "Receita")
-    mostrar_drill_conta(confirmadas, conta_sel, periodos, chave_unica="dre")
+    mostrar_kpi_conta(confirmadas_periodo, conta_sel, receita_total, "Receita")
+    mostrar_drill_conta(confirmadas_periodo, conta_sel, periodos, chave_unica="dre")
 
     st.subheader("Observações")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Títulos atrasados", len(atrasadas))
-    c2.metric("Valor atrasado", moeda(atrasadas["Valor total"].sum()))
-    c3.metric("Planos sem classificação", sem_classificacao["Plano de contas"].nunique())
+    c1.metric("Títulos atrasados", len(atrasadas_periodo))
+    c2.metric("Valor atrasado", moeda(atrasadas_periodo["Valor total"].sum()))
+    c3.metric("Planos sem classificação", sem_classificacao_periodo["Plano de contas"].nunique())
 
-    if not sem_classificacao.empty:
+    if not sem_classificacao_periodo.empty:
         st.warning("Existem planos de contas sem Conta de Resultado na aba BASE.")
-        sem = sem_classificacao.groupby("Plano de contas", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False)
+        sem = sem_classificacao_periodo.groupby("Plano de contas", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False)
         sem["Valor total"] = sem["Valor total"].apply(moeda)
         st.dataframe(sem, use_container_width=True, hide_index=True)
 
-    mostrar_drill_atrasados(atrasadas)
-    mostrar_drill_ajustes_aplicacoes(confirmadas, periodos)
+    with st.expander("Ver drill dos títulos atrasados", expanded=False):
+        mostrar_drill_atrasados(atrasadas_periodo)
+
+    with st.expander("Ver drill de Ajustes e Aplicações", expanded=False):
+        mostrar_drill_ajustes_aplicacoes(confirmadas_periodo, periodos)
 
 # ============================================================
 # DFC
@@ -490,7 +518,7 @@ elif pagina == "DFC":
     receb_por_periodo, despesas_por_conta = {}, {}
     linha_receb = ["RECEBIMENTO"]
     for p in periodos:
-        r = recebimentos.loc[recebimentos["PERIODO"] == p, "RECEBIMENTO"].sum()
+        r = recebimentos_periodo_df.loc[recebimentos_periodo_df["PERIODO"] == p, "RECEBIMENTO"].sum()
         receb_por_periodo[p] = r
         linha_receb += [r, 100 if r else 0]
     linhas.append(linha_receb)
@@ -498,7 +526,7 @@ elif pagina == "DFC":
     for conta in ordem_dfc:
         linha, total_conta_periodos = [conta], {}
         for p in periodos:
-            valor = confirmadas[(confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) & (confirmadas["PERIODO"] == p)]["Valor total"].sum()
+            valor = confirmadas_periodo[(confirmadas_periodo["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) & (confirmadas_periodo["PERIODO"] == p)]["Valor total"].sum()
             total_conta_periodos[p] = valor
             receb = receb_por_periodo.get(p, 0)
             linha += [valor, (valor / receb * 100) if receb else 0]
@@ -515,22 +543,25 @@ elif pagina == "DFC":
     dfc_formatada = formatar_tabela_valor_percentual(tabela_mes_percentual(linhas, periodos))
     st.dataframe(estilizar_tabela_principal(dfc_formatada, linhas_azuis=["RECEBIMENTO"], linhas_resultado=["RESULTADO CAIXA"]), use_container_width=True, hide_index=True)
 
-    receb_total = recebimentos["RECEBIMENTO"].sum()
+    receb_total = recebimentos_periodo_df["RECEBIMENTO"].sum()
     st.subheader("Treemap de Despesas - DFC")
-    treemap_despesas(confirmadas, ordem_dfc, "Composição das saídas e % sobre Recebimento", receb_total, "o Recebimento")
+    treemap_despesas(confirmadas_periodo, ordem_dfc, "Composição das saídas e % sobre Recebimento", receb_total, "o Recebimento")
 
     st.subheader("Drill por Conta de Resultado")
     conta_sel = st.selectbox("Selecione a conta de resultado", ordem_dfc, key="dfc_conta")
-    mostrar_kpi_conta(confirmadas, conta_sel, receb_total, "Recebimento")
-    mostrar_drill_conta(confirmadas, conta_sel, periodos, chave_unica="dfc")
+    mostrar_kpi_conta(confirmadas_periodo, conta_sel, receb_total, "Recebimento")
+    mostrar_drill_conta(confirmadas_periodo, conta_sel, periodos, chave_unica="dfc")
 
     st.subheader("Observações")
     c1, c2, c3 = st.columns(3)
     c1.metric("Títulos atrasados", len(atrasadas))
     c2.metric("Valor atrasado", moeda(atrasadas["Valor total"].sum()))
     c3.metric("Planos sem classificação", sem_classificacao["Plano de contas"].nunique())
-    mostrar_drill_atrasados(atrasadas)
-    mostrar_drill_ajustes_aplicacoes(confirmadas, periodos)
+    with st.expander("Ver drill dos títulos atrasados", expanded=False):
+        mostrar_drill_atrasados(atrasadas_periodo)
+
+    with st.expander("Ver drill de Ajustes e Aplicações", expanded=False):
+        mostrar_drill_ajustes_aplicacoes(confirmadas_periodo, periodos)
 
 # ============================================================
 # PROJETOS
@@ -645,18 +676,7 @@ elif pagina == "Ponto de Equilíbrio":
         "IMPOSTOS/deduções", "FORNECEDORES",
     ]
 
-    st.sidebar.subheader("Filtro do Ponto de Equilíbrio")
-    periodos_pe = st.sidebar.multiselect(
-        "Selecione os meses para o cálculo",
-        options=periodos,
-        default=periodos,
-        help="A média será calculada pela soma da conta nos meses selecionados dividida pela quantidade de meses selecionados."
-    )
-
-    if not periodos_pe:
-        st.warning("Selecione pelo menos um mês no filtro lateral.")
-        st.stop()
-
+    periodos_pe = periodos
     qtd_meses = len(periodos_pe)
 
     st.info(
@@ -666,9 +686,9 @@ elif pagina == "Ponto de Equilíbrio":
 
     linhas = []
     for conta in ordem_pe:
-        total_periodo = confirmadas[
-            (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
-            (confirmadas["PERIODO"].isin(periodos_pe))
+        total_periodo = confirmadas_periodo[
+            (confirmadas_periodo["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
+            (confirmadas_periodo["PERIODO"].isin(periodos_pe))
         ]["Valor total"].sum()
 
         media_mensal = total_periodo / qtd_meses if qtd_meses else 0
@@ -725,9 +745,9 @@ elif pagina == "Ponto de Equilíbrio":
     st.subheader("Drill das Contas do Ponto de Equilíbrio")
     conta_sel = st.selectbox("Selecione a conta para detalhar", ordem_pe, key="pe_conta")
 
-    dados_conta = confirmadas[
-        (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta_sel)) &
-        (confirmadas["PERIODO"].isin(periodos_pe))
+    dados_conta = confirmadas_periodo[
+        (confirmadas_periodo["CONTA_RESULTADO_NORM"] == normalizar_texto(conta_sel)) &
+        (confirmadas_periodo["PERIODO"].isin(periodos_pe))
     ].copy()
     total_conta_periodo = dados_conta["Valor total"].sum()
     media_conta = total_conta_periodo / qtd_meses if qtd_meses else 0
@@ -738,4 +758,4 @@ elif pagina == "Ponto de Equilíbrio":
     k2.metric("Média mensal da conta", moeda(media_conta))
     k3.metric("% sobre necessidade mensal", perc(perc_conta))
 
-    mostrar_drill_conta(confirmadas[confirmadas["PERIODO"].isin(periodos_pe)], conta_sel, periodos_pe, chave_unica="pe")
+    mostrar_drill_conta(confirmadas_periodo[confirmadas_periodo["PERIODO"].isin(periodos_pe)], conta_sel, periodos_pe, chave_unica="pe")
