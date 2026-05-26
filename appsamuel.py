@@ -1300,16 +1300,52 @@ def intervalo_periodos_por_meses(pergunta, periodos_disponiveis):
 
 
 def detectar_intencao_bi(pergunta):
+    """Roteador de intenção do Agente de BI.
+    A ideia é cadastrar operações de negócio, não frases exatas.
+    """
     txt = normalizar_texto(pergunta)
-    if any(x in txt for x in ["COMPAR", "EVOLUCAO", "EVOLUÇÃO", "VARIACAO", "VARIAÇÃO", "MES A MES", "MÊS A MÊS", "HISTORICO", "HISTÓRICO"]):
-        if "PROJETO" in txt or "CLIENTE" in txt:
-            return "analise_projetos"
+
+    if any(x in txt for x in ["E SE", "SIMULE", "SIMULAR", "CENARIO", "CENÁRIO", "PROJETAR IMPACTO", "IMPACTO SE"]):
+        return "cenario"
+
+    if any(x in txt for x in ["SAUDE FINANCEIRA", "SAÚDE FINANCEIRA", "DIAGNOSTICO", "DIAGNÓSTICO", "NOTA FINANCEIRA", "COMO ESTA A EMPRESA", "COMO ESTÁ A EMPRESA"]):
+        return "saude_financeira"
+
+    if any(x in txt for x in ["O QUE IMPACTOU", "MAIOR IMPACTO", "TOP IMPACTOS", "IMPACTOU O RESULTADO", "IMPACTOU O CAIXA", "POR QUE O LUCRO", "PORQUE O LUCRO", "O QUE MUDOU"]):
+        return "top_impactos"
+
+    if any(x in txt for x in ["EFICIENCIA", "EFICIÊNCIA", "PROPORCIONAL", "SOBRE A RECEITA", "% DA RECEITA", "PESA NA RECEITA", "CONSUME DA RECEITA"]):
+        return "eficiencia"
+
+    if any(x in txt for x in ["MAIORES DESPESAS", "TOP DESPESAS", "RANKING DE DESPESAS", "CONTAS QUE MAIS PESAM", "MAIORES CONTAS", "MAIORES SAIDAS", "MAIORES SAÍDAS"]):
+        return "ranking_contas"
+
+    if any(x in txt for x in ["ONDE POSSO ECONOMIZAR", "ECONOMIZAR", "REDUZIR DESPESAS", "DESPESAS CRESCERAM ACIMA", "CRESCEU ACIMA DA RECEITA"]):
+        return "inteligencia_despesas"
+
+    if any(x in txt for x in ["PROJECAO", "PROJEÇÃO", "PREVISAO", "PREVISÃO", "FECHAMENTO DO MES", "FECHAMENTO DO MÊS"]):
+        return "projecao"
+
+    if "PONTO DE EQUILIBRIO" in txt or "PONTO DE EQUILÍBRIO" in txt or "NECESSIDADE DE CAIXA" in txt:
+        return "ponto_equilibrio"
+
+    if "PROJETO" in txt or ("CLIENTE" in txt and any(x in txt for x in ["MARGEM", "MARKUP", "RECEITA", "CMV", "CUSTO", "RENTAVEL", "RENTÁVEL"])):
+        return "analise_projetos"
+
+    if any(x in txt for x in ["MARGEM BRUTA", "LUCRO BRUTO", "MARGEM %", "MARGEM PERCENTUAL"]):
+        if any(x in txt for x in ["COMPAR", "EVOLU", "VARIAC", "MES A MES", "MÊS A MÊS", "HISTORICO", "HISTÓRICO", "MELHOR", "PIOR"]):
+            return "comparativo_indicador"
+        return "margem_bruta"
+
+    if any(x in txt for x in ["COMPAR", "EVOLUCAO", "EVOLUÇÃO", "VARIACAO", "VARIAÇÃO", "MES A MES", "MÊS A MÊS", "HISTORICO", "HISTÓRICO", "CONTRA"]):
+        if any(x in txt for x in ["RECEITA", "FATURAMENTO", "CMV", "CUSTO", "MARGEM", "RESULTADO", "DRE", "DFC", "CAIXA", "RECEBIMENTO"]):
+            return "comparativo_indicador"
         return "comparativo_mensal"
+
     if any(x in txt for x in ["DETALH", "ABRA", "ABRIR", "PLANOS DE CONTAS", "POR PLANO", "LANÇAMENT", "LANCAMENT"]):
         return "detalhamento"
-    if "PROJETO" in txt or ("CLIENTE" in txt and any(x in txt for x in ["MARGEM", "MARKUP", "RECEITA", "CMV", "CUSTO"])):
-        return "analise_projetos"
-    if any(x in txt for x in ["RESUMO EXECUTIVO", "ANALISE GERAL", "ANÁLISE GERAL", "DIRETORIA", "RISCO", "OPORTUNIDADE"]):
+
+    if any(x in txt for x in ["RESUMO EXECUTIVO", "ANALISE GERAL", "ANÁLISE GERAL", "DIRETORIA", "RISCO", "OPORTUNIDADE", "EMPRESARIO", "EMPRESÁRIO"]):
         return "resumo_executivo"
     if ("RESULTADO" in txt or "LUCRO" in txt) and "DFC" in txt:
         return "resultado_dfc"
@@ -1375,6 +1411,360 @@ def montar_comparativo_entidade(entidade, ps):
     return resumo, dados
 
 
+def tabela_indicadores_periodos(ps):
+    """Monta base financeira por período para o Agente de BI."""
+    linhas = []
+    ordem_dre = [
+        "IMPOSTOS/deduções", "DESPESA COM PESSOAL", "DESPESAS OPERACIONAIS",
+        "DESPESAS FINANCEIRAS", "DESPESAS ADMINISTRATIVAS", "DESPESAS COMERCIAIS",
+    ]
+    ordem_dfc = ordem_dre + ["FORNECEDORES"]
+    for p in ps:
+        receita = receita_cmv.loc[receita_cmv["PERIODO"] == p, "RECEITA"].sum()
+        cmv = receita_cmv.loc[receita_cmv["PERIODO"] == p, "CMV"].sum()
+        recebimento = recebimentos.loc[recebimentos["PERIODO"] == p, "RECEBIMENTO"].sum()
+        despesas_dre = confirmadas[
+            (confirmadas["PERIODO"] == p) &
+            (confirmadas["CONTA_RESULTADO_NORM"].isin([normalizar_texto(c) for c in ordem_dre]))
+        ]["Valor total"].sum()
+        saidas_dfc = confirmadas[
+            (confirmadas["PERIODO"] == p) &
+            (confirmadas["CONTA_RESULTADO_NORM"].isin([normalizar_texto(c) for c in ordem_dfc]))
+        ]["Valor total"].sum()
+        margem = receita - cmv
+        resultado_dre = margem - despesas_dre
+        resultado_dfc = recebimento - saidas_dfc
+        linhas.append({
+            "PERIODO": p,
+            "Receita": receita,
+            "CMV": cmv,
+            "CMV %": (cmv / receita * 100) if receita else 0,
+            "Margem Bruta": margem,
+            "Margem Bruta %": (margem / receita * 100) if receita else 0,
+            "Despesas DRE": despesas_dre,
+            "Resultado DRE": resultado_dre,
+            "Resultado DRE %": (resultado_dre / receita * 100) if receita else 0,
+            "Recebimento": recebimento,
+            "Saídas DFC": saidas_dfc,
+            "Resultado DFC": resultado_dfc,
+            "Resultado DFC %": (resultado_dfc / recebimento * 100) if recebimento else 0,
+        })
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        df["ORDEM"] = df["PERIODO"].apply(lambda p: ps.index(p) if p in ps else 999)
+        df = df.sort_values("ORDEM").drop(columns=["ORDEM"])
+    return df
+
+
+def detectar_indicador_financeiro(pergunta):
+    txt = normalizar_texto(pergunta)
+    if "MARGEM BRUTA" in txt or "LUCRO BRUTO" in txt or "MARGEM" in txt:
+        return "Margem Bruta"
+    if "RESULTADO" in txt and "DFC" in txt or "CAIXA" in txt and "RESULTADO" in txt:
+        return "Resultado DFC"
+    if "RESULTADO" in txt and "DRE" in txt or "LUCRO" in txt and "DRE" in txt:
+        return "Resultado DRE"
+    if "RECEBIMENTO" in txt:
+        return "Recebimento"
+    if "CMV" in txt or "CUSTO" in txt:
+        return "CMV"
+    if "RECEITA" in txt or "FATURAMENTO" in txt:
+        return "Receita"
+    return "Margem Bruta"
+
+
+def resposta_comparativo_indicador(pergunta, ps):
+    indicador = detectar_indicador_financeiro(pergunta)
+    base = tabela_indicadores_periodos(ps)
+    resultado = {
+        "tipo": "bi", "intencao": "comparativo_indicador", "titulo": f"Comparativo — {indicador}",
+        "texto": "", "metricas": [], "tabelas": [], "graficos": []
+    }
+    if base.empty or indicador not in base.columns:
+        resultado["texto"] = "Não encontrei dados para montar esse comparativo."
+        return resultado
+
+    tabela = base[["PERIODO", indicador]].rename(columns={indicador: "Valor"}).copy()
+    tabela = calcular_variacao_mensal(tabela, "Valor")
+    total = tabela["Valor"].sum()
+    media = tabela["Valor"].mean() if len(tabela) else 0
+    maior = tabela.sort_values("Valor", ascending=False).iloc[0]
+    menor = tabela.sort_values("Valor", ascending=True).iloc[0]
+    var_total = tabela.iloc[-1]["Valor"] - tabela.iloc[0]["Valor"] if len(tabela) >= 2 else 0
+    var_pct = var_total / tabela.iloc[0]["Valor"] * 100 if len(tabela) >= 2 and tabela.iloc[0]["Valor"] else 0
+    sentido = "evolução" if var_total > 0 else "queda" if var_total < 0 else "estabilidade"
+
+    tabela_fmt = formatar_df_financeiro(
+        tabela[["PERIODO", "Valor", "Variação R$", "Variação %", "Tendência"]],
+        colunas_moeda=["Valor", "Variação R$"], colunas_perc=["Variação %"]
+    )
+
+    extra = ""
+    if indicador == "Margem Bruta":
+        extra_df = base[["PERIODO", "Receita", "CMV", "CMV %", "Margem Bruta", "Margem Bruta %"]].copy()
+        extra_fmt = formatar_df_financeiro(extra_df, colunas_moeda=["Receita", "CMV", "Margem Bruta"], colunas_perc=["CMV %", "Margem Bruta %"])
+        resultado["tabelas"].append(("Margem Bruta aberta por Receita e CMV", extra_fmt))
+        extra = " A margem bruta deve ser avaliada junto com o CMV %, pois aumento de receita sem ganho de margem pode indicar desconto, custo elevado ou mix menos rentável."
+
+    resultado["metricas"] = [
+        ("Total", moeda(total)),
+        ("Média mensal", moeda(media)),
+        ("Maior mês", f"{maior['PERIODO']} | {moeda(maior['Valor'])}"),
+        ("Menor mês", f"{menor['PERIODO']} | {moeda(menor['Valor'])}"),
+    ]
+    resultado["texto"] = (
+        f"Período analisado: **{', '.join(ps)}**. Do primeiro para o último mês houve **{sentido}** "
+        f"de **{moeda(abs(var_total))}** ({perc(var_pct)}).{extra}"
+    )
+    resultado["tabelas"].insert(0, ("Evolução mês a mês", tabela_fmt))
+    resultado["graficos"].append((f"Evolução — {indicador}", tabela[["PERIODO", "Valor"]], "linha"))
+    return resultado
+
+
+def resposta_margem_bruta(pergunta, ps):
+    base = tabela_indicadores_periodos(ps)
+    resultado = {"tipo": "bi", "intencao": "margem_bruta", "titulo": "Margem Bruta", "texto": "", "metricas": [], "tabelas": [], "graficos": []}
+    if base.empty:
+        resultado["texto"] = "Não encontrei dados de receita e CMV para calcular margem bruta."
+        return resultado
+    receita = base["Receita"].sum()
+    cmv = base["CMV"].sum()
+    margem = receita - cmv
+    margem_pct = margem / receita * 100 if receita else 0
+    cmv_pct = cmv / receita * 100 if receita else 0
+    resultado["metricas"] = [
+        ("Receita", moeda(receita)), ("CMV", moeda(cmv)), ("Margem Bruta", moeda(margem)), ("Margem Bruta %", perc(margem_pct))
+    ]
+    leitura = "Margem saudável." if margem_pct >= 35 else "Margem intermediária; vale revisar mix, custo e descontos." if margem_pct >= 20 else "Margem baixa; atenção para precificação, custo e composição de vendas."
+    resultado["texto"] = f"No período **{', '.join(ps)}**, o CMV representou **{perc(cmv_pct)}** da receita. **Leitura:** {leitura}"
+    tabela = base[["PERIODO", "Receita", "CMV", "CMV %", "Margem Bruta", "Margem Bruta %"]].copy()
+    tabela_fmt = formatar_df_financeiro(tabela, colunas_moeda=["Receita", "CMV", "Margem Bruta"], colunas_perc=["CMV %", "Margem Bruta %"])
+    resultado["tabelas"].append(("Margem por período", tabela_fmt))
+    resultado["graficos"].append(("Margem Bruta mensal", base[["PERIODO", "Margem Bruta"]].rename(columns={"Margem Bruta": "Valor"}), "linha"))
+    return resultado
+
+
+def resposta_top_impactos(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"top_impactos", "titulo":"Top impactos no resultado", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    if len(ps) < 2:
+        resultado["texto"] = "Para analisar impacto, informe dois meses ou um intervalo. Exemplo: **O que impactou o resultado de março para abril?**"
+        return resultado
+    p1, p2 = ps[-2], ps[-1]
+    contas_dre = ["IMPOSTOS/deduções", "DESPESA COM PESSOAL", "DESPESAS OPERACIONAIS", "DESPESAS FINANCEIRAS", "DESPESAS ADMINISTRATIVAS", "DESPESAS COMERCIAIS"]
+    d1, d2 = calcular_dre_periodo(p1), calcular_dre_periodo(p2)
+    linhas = []
+    linhas.append({"Item":"Receita", p1:d1["receita"], p2:d2["receita"], "Variação":d2["receita"]-d1["receita"], "Impacto no resultado":d2["receita"]-d1["receita"]})
+    linhas.append({"Item":"CMV", p1:d1["cmv"], p2:d2["cmv"], "Variação":d2["cmv"]-d1["cmv"], "Impacto no resultado":-(d2["cmv"]-d1["cmv"])})
+    for c in contas_dre:
+        v1, v2 = d1["despesas"].get(c,0), d2["despesas"].get(c,0)
+        linhas.append({"Item":c, p1:v1, p2:v2, "Variação":v2-v1, "Impacto no resultado":-(v2-v1)})
+    df = pd.DataFrame(linhas)
+    df["Impacto absoluto"] = df["Impacto no resultado"].abs()
+    df = df.sort_values("Impacto absoluto", ascending=False).drop(columns=["Impacto absoluto"])
+    resultado_dif = d2["resultado_dre"] - d1["resultado_dre"]
+    resultado["metricas"] = [("Resultado DRE anterior", moeda(d1["resultado_dre"])), ("Resultado DRE atual", moeda(d2["resultado_dre"])), ("Variação do resultado", moeda(resultado_dif)), ("Período", f"{p1} → {p2}")]
+    sentido = "melhorou" if resultado_dif > 0 else "piorou" if resultado_dif < 0 else "ficou estável"
+    resultado["texto"] = f"De **{p1}** para **{p2}**, o resultado DRE **{sentido}** em **{moeda(abs(resultado_dif))}**. A tabela mostra o impacto de cada linha no resultado."
+    df_fmt = formatar_df_financeiro(df, colunas_moeda=[p1, p2, "Variação", "Impacto no resultado"])
+    resultado["tabelas"].append(("Impactos no resultado", df_fmt))
+    graf = df[["Item", "Impacto no resultado"]].rename(columns={"Item":"PERIODO", "Impacto no resultado":"Valor"}).head(10)
+    resultado["graficos"].append(("Principais impactos", graf, "barra"))
+    return resultado
+
+
+def resposta_eficiencia(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"eficiencia", "titulo":"Análise de eficiência", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    entidade = localizar_entidade_bi(pergunta)
+    base = tabela_indicadores_periodos(ps)
+    if base.empty:
+        resultado["texto"] = "Não encontrei dados para análise de eficiência."
+        return resultado
+    if entidade["tipo"]:
+        resumo, _ = montar_comparativo_entidade(entidade, ps)
+        df = base[["PERIODO", "Receita", "Recebimento"]].merge(resumo[["PERIODO", "Valor"]], on="PERIODO", how="left").fillna({"Valor":0})
+        df["% Receita"] = np.where(df["Receita"] != 0, df["Valor"] / df["Receita"] * 100, 0)
+        df["% Recebimento"] = np.where(df["Recebimento"] != 0, df["Valor"] / df["Recebimento"] * 100, 0)
+        titulo = entidade["titulo"]
+    else:
+        df = base[["PERIODO", "Receita", "CMV", "CMV %", "Margem Bruta %", "Despesas DRE", "Resultado DRE %"]].copy()
+        titulo = "Indicadores principais"
+    resultado["titulo"] = f"Eficiência — {titulo}"
+    if entidade["tipo"]:
+        media = df["% Receita"].mean()
+        resultado["metricas"] = [("Média sobre receita", perc(media)), ("Maior peso", perc(df["% Receita"].max())), ("Menor peso", perc(df["% Receita"].min())), ("Período", ", ".join(ps))]
+        resultado["texto"] = "Quanto menor o percentual sobre receita, maior tende a ser a eficiência operacional dessa conta, desde que não haja perda de qualidade ou capacidade produtiva."
+        df_fmt = formatar_df_financeiro(df, colunas_moeda=["Receita", "Recebimento", "Valor"], colunas_perc=["% Receita", "% Recebimento"])
+        resultado["tabelas"].append(("Peso mensal da conta", df_fmt))
+        resultado["graficos"].append(("% da Receita", df[["PERIODO", "% Receita"]].rename(columns={"% Receita":"Valor"}), "linha"))
+    else:
+        df_fmt = formatar_df_financeiro(df, colunas_moeda=["Receita", "CMV", "Despesas DRE"], colunas_perc=["CMV %", "Margem Bruta %", "Resultado DRE %"])
+        resultado["texto"] = "A eficiência deve ser lida pela combinação de CMV %, Margem Bruta %, Despesas sobre receita e Resultado DRE %."
+        resultado["tabelas"].append(("Eficiência por mês", df_fmt))
+        resultado["graficos"].append(("Margem Bruta %", df[["PERIODO", "Margem Bruta %"]].rename(columns={"Margem Bruta %":"Valor"}), "linha"))
+    return resultado
+
+
+def resposta_ranking_contas(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"ranking_contas", "titulo":"Ranking de despesas/contas", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    txt = normalizar_texto(pergunta)
+    dados = confirmadas[confirmadas["PERIODO"].isin(ps)].copy()
+    if dados.empty:
+        resultado["texto"] = "Não encontrei lançamentos no período selecionado."
+        return resultado
+    if "PLANO" in txt or "PLANOS" in txt or "DESPESA" in txt:
+        agrup = dados.groupby("Plano de contas", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False).head(20)
+        agrup = agrup.rename(columns={"Plano de contas":"Conta", "Valor total":"Valor"})
+    else:
+        agrup = dados.groupby("CONTA_RESULTADO", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False).head(20)
+        agrup = agrup.rename(columns={"CONTA_RESULTADO":"Conta", "Valor total":"Valor"})
+    total = agrup["Valor"].sum()
+    agrup["% sobre ranking"] = np.where(total != 0, agrup["Valor"] / total * 100, 0)
+    resultado["metricas"] = [("Total top contas", moeda(total)), ("Maior conta", str(agrup.iloc[0]["Conta"])), ("Valor maior conta", moeda(agrup.iloc[0]["Valor"])), ("Período", ", ".join(ps))]
+    resultado["texto"] = "Esse ranking ajuda a identificar onde estão os maiores blocos de gasto e onde a gestão deve olhar primeiro."
+    agrup_fmt = formatar_df_financeiro(agrup, colunas_moeda=["Valor"], colunas_perc=["% sobre ranking"])
+    resultado["tabelas"].append(("Top contas", agrup_fmt))
+    resultado["graficos"].append(("Top contas", agrup.head(10).rename(columns={"Conta":"PERIODO"})[["PERIODO", "Valor"]], "barra"))
+    return resultado
+
+
+def resposta_inteligencia_despesas(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"inteligencia_despesas", "titulo":"Inteligência de despesas", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    if len(ps) < 2:
+        resultado["texto"] = "Para analisar economia, selecione ou informe pelo menos dois meses. Exemplo: **Onde posso economizar de janeiro a abril?**"
+        return resultado
+    dados = confirmadas[confirmadas["PERIODO"].isin(ps)].copy()
+    if dados.empty:
+        resultado["texto"] = "Não encontrei despesas no período."
+        return resultado
+    pivot = pd.pivot_table(dados, values="Valor total", index="Plano de contas", columns="PERIODO", aggfunc="sum", fill_value=0)
+    for p in ps:
+        if p not in pivot.columns:
+            pivot[p] = 0
+    pivot = pivot[ps]
+    pivot["Total"] = pivot[ps].sum(axis=1)
+    pivot["Variação início/fim"] = pivot[ps[-1]] - pivot[ps[0]]
+    pivot["Variação %"] = np.where(pivot[ps[0]] != 0, pivot["Variação início/fim"] / pivot[ps[0]] * 100, 0)
+    df = pivot.reset_index().sort_values(["Variação início/fim", "Total"], ascending=False).head(20)
+    potencial = df[df["Variação início/fim"] > 0]["Variação início/fim"].sum()
+    resultado["metricas"] = [("Aumento mapeado", moeda(potencial)), ("Contas analisadas", dados["Plano de contas"].nunique()), ("Maior alta", str(df.iloc[0]["Plano de contas"])), ("Período", f"{ps[0]} → {ps[-1]}")]
+    resultado["texto"] = "Priorize contas com alta recorrente e crescimento acima da receita. Nem toda alta é problema, mas toda alta relevante merece explicação."
+    df_fmt = formatar_df_financeiro(df, colunas_moeda=ps+["Total", "Variação início/fim"], colunas_perc=["Variação %"])
+    resultado["tabelas"].append(("Contas com maior aumento", df_fmt))
+    resultado["graficos"].append(("Maiores altas", df[["Plano de contas", "Variação início/fim"]].rename(columns={"Plano de contas":"PERIODO", "Variação início/fim":"Valor"}).head(10), "barra"))
+    return resultado
+
+
+def resposta_saude_financeira(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"saude_financeira", "titulo":"Diagnóstico de saúde financeira", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    base = tabela_indicadores_periodos(ps)
+    if base.empty:
+        resultado["texto"] = "Não encontrei dados para diagnóstico."
+        return resultado
+    receita = base["Receita"].sum(); cmv = base["CMV"].sum(); margem = receita-cmv
+    receb = base["Recebimento"].sum(); saidas = base["Saídas DFC"].sum(); resultado_dfc = receb-saidas
+    despesas_dre = base["Despesas DRE"].sum(); resultado_dre = margem-despesas_dre
+    margem_pct = margem/receita*100 if receita else 0
+    cmv_pct = cmv/receita*100 if receita else 0
+    dre_pct = resultado_dre/receita*100 if receita else 0
+    caixa_pct = resultado_dfc/receb*100 if receb else 0
+    score = 0
+    score += 2.5 if margem_pct >= 35 else 1.5 if margem_pct >= 20 else 0.5
+    score += 2.0 if dre_pct >= 10 else 1.0 if dre_pct >= 0 else 0
+    score += 2.0 if caixa_pct >= 10 else 1.0 if caixa_pct >= 0 else 0
+    score += 1.5 if cmv_pct <= 65 else 0.8 if cmv_pct <= 80 else 0.2
+    score += 2.0 if receita > 0 and receb > 0 else 0.5
+    pontos = []
+    if margem_pct < 25: pontos.append("Margem bruta baixa")
+    if dre_pct < 0: pontos.append("Resultado DRE negativo")
+    if caixa_pct < 0: pontos.append("Resultado de caixa negativo")
+    if cmv_pct > 75: pontos.append("CMV alto sobre receita")
+    if not pontos: pontos.append("Sem alerta crítico pelos indicadores principais")
+    resultado["metricas"] = [("Nota financeira", f"{score:.1f}/10"), ("Margem Bruta %", perc(margem_pct)), ("Resultado DRE %", perc(dre_pct)), ("Resultado Caixa %", perc(caixa_pct))]
+    resultado["texto"] = "**Pontos de atenção:** " + "; ".join(pontos) + ". Use esse diagnóstico como triagem executiva; a decisão final deve considerar sazonalidade e lançamentos extraordinários."
+    df = pd.DataFrame([
+        {"Indicador":"Receita", "Valor":receita}, {"Indicador":"CMV", "Valor":cmv}, {"Indicador":"Margem Bruta", "Valor":margem},
+        {"Indicador":"Despesas DRE", "Valor":despesas_dre}, {"Indicador":"Resultado DRE", "Valor":resultado_dre},
+        {"Indicador":"Recebimento", "Valor":receb}, {"Indicador":"Saídas DFC", "Valor":saidas}, {"Indicador":"Resultado DFC", "Valor":resultado_dfc},
+    ])
+    df_fmt = formatar_df_financeiro(df, colunas_moeda=["Valor"])
+    resultado["tabelas"].append(("Resumo financeiro", df_fmt))
+    return resultado
+
+
+def resposta_cenario(pergunta, ps):
+    import re
+    resultado = {"tipo":"bi", "intencao":"cenario", "titulo":"Simulação de cenário", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    base = tabela_indicadores_periodos(ps[-1:])
+    if base.empty:
+        resultado["texto"] = "Não encontrei um mês-base para simular. Informe um mês, por exemplo: **E se reduzir pessoal em 10% em ABR/25?**"
+        return resultado
+    p = base.iloc[0]["PERIODO"]
+    pct_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*%", pergunta)
+    pct = float(pct_match.group(1).replace(",", ".")) if pct_match else 10.0
+    txt = normalizar_texto(pergunta)
+    direcao = -1 if any(x in txt for x in ["REDUZ", "CAIR", "DIMINUI", "CORT"] ) else 1
+    d = calcular_dre_periodo(p)
+    receita = d["receita"]; cmv = d["cmv"]; despesas = sum(d["despesas"].values()); resultado_atual = d["resultado_dre"]
+    conta = localizar_conta_resultado_na_pergunta(pergunta)
+    receita_n, cmv_n, despesas_n = receita, cmv, despesas
+    alvo = ""
+    impacto = 0
+    if "RECEITA" in txt or "FATURAMENTO" in txt:
+        alvo = "Receita"; receita_n = receita * (1 + direcao * pct/100); impacto = receita_n - receita
+    elif "CMV" in txt or "CUSTO" in txt:
+        alvo = "CMV"; cmv_n = cmv * (1 + direcao * pct/100); impacto = -(cmv_n - cmv)
+    elif conta:
+        alvo = conta; valor_conta = d["despesas"].get(conta, 0); novo_valor = valor_conta * (1 + direcao * pct/100); despesas_n = despesas - valor_conta + novo_valor; impacto = -(novo_valor - valor_conta)
+    else:
+        alvo = "Despesas DRE"; despesas_n = despesas * (1 + direcao * pct/100); impacto = -(despesas_n - despesas)
+    resultado_novo = receita_n - cmv_n - despesas_n
+    df = pd.DataFrame([
+        {"Cenário":"Atual", "Receita":receita, "CMV":cmv, "Despesas DRE":despesas, "Resultado DRE":resultado_atual},
+        {"Cenário":"Simulado", "Receita":receita_n, "CMV":cmv_n, "Despesas DRE":despesas_n, "Resultado DRE":resultado_novo},
+    ])
+    df["Margem Resultado %"] = np.where(df["Receita"] != 0, df["Resultado DRE"] / df["Receita"] * 100, 0)
+    resultado["metricas"] = [("Mês-base", p), ("Alvo", alvo), ("Variação simulada", perc(direcao*pct)), ("Impacto estimado", moeda(impacto))]
+    resultado["texto"] = f"Simulação sobre **{p}**. Resultado DRE sairia de **{moeda(resultado_atual)}** para **{moeda(resultado_novo)}**."
+    df_fmt = formatar_df_financeiro(df, colunas_moeda=["Receita", "CMV", "Despesas DRE", "Resultado DRE"], colunas_perc=["Margem Resultado %"])
+    resultado["tabelas"].append(("Cenário atual x simulado", df_fmt))
+    return resultado
+
+
+def resposta_ponto_equilibrio_bi(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"ponto_equilibrio", "titulo":"Ponto de Equilíbrio / Necessidade de Caixa", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    ordem_pe = ["DESPESA COM PESSOAL", "AJUSTE", "DESPESAS OPERACIONAIS", "APLICAÇÃO", "DESPESAS FINANCEIRAS", "DESPESAS ADMINISTRATIVAS", "DESPESAS COMERCIAIS", "IMPOSTOS/deduções", "FORNECEDORES"]
+    qtd = len(ps) if ps else 1
+    linhas = []
+    for conta in ordem_pe:
+        total = confirmadas[(confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) & (confirmadas["PERIODO"].isin(ps))]["Valor total"].sum()
+        linhas.append({"Conta":conta, "Total no período":total, "Média mensal":total/qtd if qtd else 0})
+    df = pd.DataFrame(linhas).sort_values("Média mensal", ascending=False)
+    necessidade_mes = df["Média mensal"].sum(); necessidade_semana = necessidade_mes/4; necessidade_dia = necessidade_semana/7
+    df["% sobre necessidade"] = np.where(necessidade_mes != 0, df["Média mensal"] / necessidade_mes * 100, 0)
+    resultado["metricas"] = [("Necessidade mês", moeda(necessidade_mes)), ("Necessidade semana", moeda(necessidade_semana)), ("Necessidade dia", moeda(necessidade_dia)), ("Meses", qtd)]
+    resultado["texto"] = "Essa é a média mensal de saídas usada como referência de necessidade de caixa/ponto de equilíbrio operacional."
+    df_fmt = formatar_df_financeiro(df, colunas_moeda=["Total no período", "Média mensal"], colunas_perc=["% sobre necessidade"])
+    resultado["tabelas"].append(("Composição da necessidade", df_fmt))
+    resultado["graficos"].append(("Composição", df.rename(columns={"Conta":"PERIODO", "Média mensal":"Valor"})[["PERIODO", "Valor"]].head(10), "barra"))
+    return resultado
+
+
+def resposta_projecao(pergunta, ps):
+    resultado = {"tipo":"bi", "intencao":"projecao", "titulo":"Projeção de fechamento", "texto":"", "metricas":[], "tabelas":[], "graficos":[]}
+    # Como a base está agregada por mês, sem dia realizado, usamos média dos meses selecionados como referência simples.
+    base = tabela_indicadores_periodos(ps)
+    if base.empty:
+        resultado["texto"] = "Não encontrei dados para projeção."
+        return resultado
+    medias = base[["Receita", "CMV", "Margem Bruta", "Resultado DRE", "Recebimento", "Resultado DFC"]].mean(numeric_only=True)
+    df = pd.DataFrame([{"Indicador":k, "Projeção simples pela média mensal":v} for k, v in medias.items()])
+    resultado["metricas"] = [("Base", ", ".join(ps)), ("Receita média", moeda(medias.get("Receita",0))), ("Resultado DRE médio", moeda(medias.get("Resultado DRE",0))), ("Resultado DFC médio", moeda(medias.get("Resultado DFC",0)))]
+    resultado["texto"] = "Projeção simples baseada na média mensal dos períodos selecionados. Para previsão diária real, a base precisa ter dados por dia útil realizado."
+    df_fmt = formatar_df_financeiro(df, colunas_moeda=["Projeção simples pela média mensal"])
+    resultado["tabelas"].append(("Projeção pela média", df_fmt))
+    return resultado
+
+
 def executar_agente_bi(pergunta, periodos_contexto):
     """Agente de BI sem IA externa: interpreta intenção, extrai parâmetros e calcula com Pandas."""
     periodos_disponiveis = ordenar_periodos(sorted(
@@ -1398,6 +1788,36 @@ def executar_agente_bi(pergunta, periodos_contexto):
         "tabelas": [],
         "graficos": [],
     }
+
+    if intencao == "comparativo_indicador":
+        return resposta_comparativo_indicador(pergunta, ps)
+
+    if intencao == "margem_bruta":
+        return resposta_margem_bruta(pergunta, ps)
+
+    if intencao == "top_impactos":
+        return resposta_top_impactos(pergunta, ps)
+
+    if intencao == "eficiencia":
+        return resposta_eficiencia(pergunta, ps)
+
+    if intencao == "ranking_contas":
+        return resposta_ranking_contas(pergunta, ps)
+
+    if intencao == "inteligencia_despesas":
+        return resposta_inteligencia_despesas(pergunta, ps)
+
+    if intencao == "saude_financeira":
+        return resposta_saude_financeira(pergunta, ps)
+
+    if intencao == "cenario":
+        return resposta_cenario(pergunta, ps)
+
+    if intencao == "ponto_equilibrio":
+        return resposta_ponto_equilibrio_bi(pergunta, ps)
+
+    if intencao == "projecao":
+        return resposta_projecao(pergunta, ps)
 
     if intencao == "comparativo_mensal":
         entidade = localizar_entidade_bi(pergunta)
@@ -1883,22 +2303,28 @@ elif pagina == "Perguntas e Respostas":
 
     st.info(
         "Exemplos: **Compare despesas com pessoal de outubro até abril**, "
-        "**Compare energia de OUT/25 a ABR/26**, **Detalhe energia**, "
-        "**Detalhe despesas operacionais**, ou **Faça uma análise dos projetos**."
+        "**Compare margem bruta de OUT/25 a ABR/26**, **O que impactou o resultado de março para abril?**, "
+        "**Detalhe energia**, **Onde posso economizar?**, **E se reduzir pessoal em 10%?**, "
+        "ou **Faça um diagnóstico financeiro**."
     )
 
     exemplos = gerar_100_exemplos_perguntas()
     exemplos_extra = [
         "Compare despesas com pessoal de outubro até abril.",
-        "Compare despesas operacionais de novembro até março.",
+        "Compare margem bruta de outubro até abril.",
+        "Qual foi a margem bruta de ABR/25?",
+        "O que impactou o resultado de março para abril?",
+        "Quais são as maiores despesas do período?",
+        "Onde posso economizar de janeiro até abril?",
+        "Faça um diagnóstico de saúde financeira.",
+        "E se reduzir despesas com pessoal em 10%?",
+        "E se aumentar receita em 15%?",
+        "Analise a eficiência de despesas com pessoal sobre a receita.",
         "Compare energia de outubro até abril.",
-        "Compare aluguel de janeiro até maio.",
         "Detalhe energia elétrica.",
-        "Detalhe o plano de contas aluguel.",
-        "Detalhe impostos por plano de contas.",
-        "Mostre a evolução de fornecedores de OUT/25 a ABR/26.",
+        "Mostre o ponto de equilíbrio do período.",
         "Faça uma análise dos projetos de janeiro até abril.",
-        "Qual foi o resultado DRE de ABR/25?",
+        "Qual projeto teve maior margem?",
     ]
     exemplos = exemplos_extra + [e for e in exemplos if e not in exemplos_extra]
 
