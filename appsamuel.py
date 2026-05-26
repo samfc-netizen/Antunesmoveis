@@ -663,9 +663,98 @@ def periodos_da_pergunta(pergunta, periodos_disponiveis):
 
 
 def df_para_markdown_tabela(df, max_linhas=20):
+    """Gera tabela em texto sem depender da biblioteca tabulate.
+    Evita erro no Streamlit Cloud quando o pandas tenta usar df.to_markdown().
+    """
     if df is None or df.empty:
         return "Sem dados para exibir."
-    return df.head(max_linhas).to_markdown(index=False)
+    texto = df.head(max_linhas).astype(str).to_string(index=False)
+    return f"```text\n{texto}\n```"
+
+
+def calcular_variacao_mensal(resumo, coluna_valor="Valor total"):
+    out = resumo.copy()
+    if out.empty or coluna_valor not in out.columns:
+        return out
+    out["Variação R$"] = out[coluna_valor].diff().fillna(0)
+    out["Variação %"] = np.where(out[coluna_valor].shift(1).fillna(0) != 0, out["Variação R$"] / out[coluna_valor].shift(1) * 100, 0)
+    out["Tendência"] = np.select(
+        [out["Variação R$"] > 0, out["Variação R$"] < 0],
+        ["Evolução", "Queda"],
+        default="Estável"
+    )
+    return out
+
+
+def localizar_planos_contas_na_pergunta(pergunta, limite=12):
+    """Busca dinâmica por Plano de Contas.
+    Ex.: pergunta com 'energia' encontra 'Energia elétrica + água'.
+    """
+    import difflib
+    txt = normalizar_texto(pergunta)
+    stop = {
+        "DETALHE", "DETALHAR", "DETALHAMENTO", "COMPARE", "COMPARAR", "COMPARATIVO",
+        "EVOLUCAO", "EVOLUÇÃO", "VARIACAO", "VARIAÇÃO", "DESPESA", "DESPESAS",
+        "CONTA", "PLANO", "PLANOS", "CONTAS", "RESULTADO", "VALOR", "VALORES",
+        "MES", "MESES", "MES A MES", "MENSAL", "DE", "DA", "DAS", "DO", "DOS",
+        "EM", "NO", "NA", "NOS", "NAS", "A", "ATE", "ATÉ", "ENTRE", "POR", "PARA",
+        "QUAL", "QUAIS", "FOI", "FORAM", "MOSTRE", "MOSTRAR", "ABRA", "ABRIR"
+    }
+    # remove períodos e nomes de meses da busca
+    for p in sorted(set(confirmadas["PERIODO"].dropna().astype(str))):
+        txt = txt.replace(normalizar_texto(p), " ")
+        txt = txt.replace(normalizar_texto(p.replace("/", " ")), " ")
+    for mes in list(MESES_ORDEM.keys()) + list(MESES_ABREV.values()):
+        txt = txt.replace(normalizar_texto(mes), " ")
+    for alias in ALIAS_CONTAS_RESULTADO.keys():
+        txt = txt.replace(alias, " ")
+
+    termos = [t for t in txt.split() if len(t) >= 4 and t not in stop and not t.isdigit()]
+    planos = confirmadas[["Plano de contas", "PLANO_NORM"]].dropna().drop_duplicates()
+    if planos.empty:
+        return []
+
+    matches = []
+    for _, row in planos.iterrows():
+        plano = str(row["Plano de contas"]).strip()
+        plano_norm = str(row["PLANO_NORM"]).strip()
+        score = 0
+        for termo in termos:
+            if termo and termo in plano_norm:
+                score += 10 + len(termo)
+        if txt.strip() and txt.strip() in plano_norm:
+            score += 20
+        if score > 0:
+            matches.append((score, plano, plano_norm))
+
+    if not matches and termos:
+        plano_norms = planos["PLANO_NORM"].astype(str).tolist()
+        for termo in termos:
+            for prox in difflib.get_close_matches(termo, plano_norms, n=limite, cutoff=0.68):
+                plano = planos.loc[planos["PLANO_NORM"].astype(str).eq(prox), "Plano de contas"].iloc[0]
+                matches.append((5, str(plano), prox))
+
+    unicos = {}
+    for score, plano, plano_norm in matches:
+        if plano_norm not in unicos or score > unicos[plano_norm][0]:
+            unicos[plano_norm] = (score, plano)
+    ordenados = sorted(unicos.values(), key=lambda x: x[0], reverse=True)[:limite]
+    return [plano for _, plano in ordenados]
+
+
+def resumo_plano_por_periodo(planos, periodos_ref=None):
+    periodos_ref = periodos_ref or ordenar_periodos(confirmadas["PERIODO"].dropna().unique())
+    planos_norm = [normalizar_texto(p) for p in planos]
+    dados = confirmadas[
+        (confirmadas["PLANO_NORM"].isin(planos_norm)) &
+        (confirmadas["PERIODO"].isin(periodos_ref))
+    ].copy()
+    resumo = dados.groupby("PERIODO", as_index=False)["Valor total"].sum()
+    todos = pd.DataFrame({"PERIODO": periodos_ref})
+    resumo = todos.merge(resumo, on="PERIODO", how="left").fillna({"Valor total": 0})
+    resumo["ORDEM"] = resumo["PERIODO"].apply(lambda p: periodos_ref.index(p) if p in periodos_ref else 999)
+    resumo = resumo.sort_values("ORDEM").drop(columns=["ORDEM"])
+    return resumo, dados
 
 
 def resumo_conta_por_periodo(conta, periodos_ref=None):
@@ -684,70 +773,145 @@ def resumo_conta_por_periodo(conta, periodos_ref=None):
 
 def responder_comparativo_despesa(pergunta, periodos_disponiveis):
     conta = localizar_conta_resultado_na_pergunta(pergunta)
-    if not conta:
-        return "Identifiquei que você quer um comparativo, mas não consegui localizar a conta de resultado. Exemplo: 'Compare despesas com pessoal de JAN/25 a MAR/25'."
+    planos = [] if conta else localizar_planos_contas_na_pergunta(pergunta)
+
+    if not conta and not planos:
+        return (
+            "Identifiquei que você quer um comparativo, mas não consegui localizar a despesa/conta. "
+            "Exemplos: 'Compare despesas com pessoal de JAN/25 a MAR/25' ou 'Compare energia de outubro a abril'."
+        )
+
     ps = periodos_da_pergunta(pergunta, periodos_disponiveis)
     if not ps:
         ps = periodos_disponiveis
-    resumo = resumo_conta_por_periodo(conta, ps)
+
+    if conta:
+        titulo = conta
+        resumo = resumo_conta_por_periodo(conta, ps)
+        base_dados = confirmadas[
+            (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
+            (confirmadas["PERIODO"].isin(ps))
+        ].copy()
+    else:
+        titulo = " + ".join(planos[:3]) + ("..." if len(planos) > 3 else "")
+        resumo, base_dados = resumo_plano_por_periodo(planos, ps)
+
+    resumo = calcular_variacao_mensal(resumo, "Valor total")
     total = resumo["Valor total"].sum()
     media = resumo["Valor total"].mean() if len(resumo) else 0
     maior = resumo.sort_values("Valor total", ascending=False).iloc[0] if not resumo.empty else None
     menor = resumo.sort_values("Valor total", ascending=True).iloc[0] if not resumo.empty else None
+
     resumo_fmt = resumo.copy()
     resumo_fmt["Valor"] = resumo_fmt["Valor total"].apply(moeda)
-    resumo_fmt = resumo_fmt[["PERIODO", "Valor"]]
+    resumo_fmt["Variação R$"] = resumo_fmt["Variação R$"].apply(moeda)
+    resumo_fmt["Variação %"] = resumo_fmt["Variação %"].apply(perc)
+    resumo_fmt = resumo_fmt[["PERIODO", "Valor", "Variação R$", "Variação %", "Tendência"]]
+
     variacao_txt = ""
+    leitura = ""
     if len(resumo) >= 2:
         ini = resumo.iloc[0]["Valor total"]
         fim = resumo.iloc[-1]["Valor total"]
         var = fim - ini
         var_pct = (var / ini * 100) if ini else 0
-        variacao_txt = f"\n\nVariação do primeiro para o último período: **{moeda(var)}** ({perc(var_pct)})."
+        sentido = "evolução" if var > 0 else "queda" if var < 0 else "estabilidade"
+        variacao_txt = f"\n\nDo primeiro para o último período houve **{sentido}** de **{moeda(abs(var))}** ({perc(var_pct)})."
+        leitura = "Atenção: a despesa aumentou no período, vale verificar os lançamentos que puxaram essa alta." if var > 0 else "Boa leitura: houve redução no período, vale entender se foi ganho de eficiência ou apenas postergação de pagamento." if var < 0 else "A conta ficou praticamente estável no período."
+
+    detalhe_planos = ""
+    if not base_dados.empty:
+        por_plano = base_dados.groupby("Plano de contas", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False).head(10)
+        por_plano["Valor"] = por_plano["Valor total"].apply(moeda)
+        detalhe_planos = "\n\n#### Principais planos de contas encontrados\n" + df_para_markdown_tabela(por_plano[["Plano de contas", "Valor"]], 10)
+
     return (
-        f"### Comparativo de {conta}\n\n"
+        f"### Comparativo mensal — {titulo}\n\n"
         f"Período analisado: **{', '.join(ps)}**.\n\n"
         f"Total: **{moeda(total)}**.\n"
         f"Média mensal: **{moeda(media)}**.\n"
         f"Maior mês: **{maior['PERIODO']}**, com **{moeda(maior['Valor total'])}**.\n"
         f"Menor mês: **{menor['PERIODO']}**, com **{moeda(menor['Valor total'])}**."
         f"{variacao_txt}\n\n"
-        f"{df_para_markdown_tabela(resumo_fmt, 36)}"
+        f"**Leitura gerencial:** {leitura}\n\n"
+        f"#### Mês a mês\n"
+        f"{df_para_markdown_tabela(resumo_fmt, 48)}"
+        f"{detalhe_planos}"
     )
-
 
 def responder_detalhamento_conta(pergunta, periodos_disponiveis):
     conta = localizar_conta_resultado_na_pergunta(pergunta)
-    if not conta:
-        return "Identifiquei que você quer um detalhamento, mas não consegui localizar a conta de resultado. Exemplo: 'Detalhe as despesas com pessoal de JAN/25'."
+    planos = [] if conta else localizar_planos_contas_na_pergunta(pergunta)
+
+    if not conta and not planos:
+        return (
+            "Identifiquei que você quer um detalhamento, mas não consegui localizar a conta. "
+            "Exemplos: 'Detalhe despesas com pessoal', 'Detalhe energia', 'Detalhe aluguel' ou 'Detalhe impostos de JAN/25'."
+        )
+
     ps = periodos_da_pergunta(pergunta, periodos_disponiveis)
     if not ps:
         ps = periodos_disponiveis
-    dados = confirmadas[
-        (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
-        (confirmadas["PERIODO"].isin(ps))
-    ].copy()
+
+    if conta:
+        titulo = conta
+        dados = confirmadas[
+            (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
+            (confirmadas["PERIODO"].isin(ps))
+        ].copy()
+    else:
+        titulo = "Plano de contas: " + " + ".join(planos[:5]) + ("..." if len(planos) > 5 else "")
+        dados = confirmadas[
+            (confirmadas["PLANO_NORM"].isin([normalizar_texto(p) for p in planos])) &
+            (confirmadas["PERIODO"].isin(ps))
+        ].copy()
+
     if dados.empty:
-        return f"Não encontrei lançamentos para **{conta}** no período solicitado."
+        return f"Não encontrei lançamentos para **{titulo}** no período solicitado."
+
     resumo = dados.groupby("Plano de contas", as_index=False).agg(
         Qtd=("Valor total", "count"),
         Valor=("Valor total", "sum")
     ).sort_values("Valor", ascending=False)
     total = resumo["Valor"].sum()
-    resumo["% sobre conta"] = np.where(total != 0, resumo["Valor"] / total * 100, 0)
+    resumo["% sobre total"] = np.where(total != 0, resumo["Valor"] / total * 100, 0)
+
     resumo_fmt = resumo.copy()
     resumo_fmt["Valor"] = resumo_fmt["Valor"].apply(moeda)
-    resumo_fmt["% sobre conta"] = resumo_fmt["% sobre conta"].apply(perc)
+    resumo_fmt["% sobre total"] = resumo_fmt["% sobre total"].apply(perc)
     top = resumo.iloc[0]
+
+    mensal = dados.groupby("PERIODO", as_index=False)["Valor total"].sum()
+    todos = pd.DataFrame({"PERIODO": ps})
+    mensal = todos.merge(mensal, on="PERIODO", how="left").fillna({"Valor total": 0})
+    mensal["ORDEM"] = mensal["PERIODO"].apply(lambda p: ps.index(p) if p in ps else 999)
+    mensal = calcular_variacao_mensal(mensal.sort_values("ORDEM").drop(columns=["ORDEM"]), "Valor total")
+    mensal_fmt = mensal.copy()
+    mensal_fmt["Valor"] = mensal_fmt["Valor total"].apply(moeda)
+    mensal_fmt["Variação R$"] = mensal_fmt["Variação R$"].apply(moeda)
+    mensal_fmt["Variação %"] = mensal_fmt["Variação %"].apply(perc)
+    mensal_fmt = mensal_fmt[["PERIODO", "Valor", "Variação R$", "Variação %", "Tendência"]]
+
+    descricoes = dados.groupby(["Plano de contas", "Descrição"], as_index=False).agg(
+        Qtd=("Valor total", "count"),
+        Valor=("Valor total", "sum")
+    ).sort_values("Valor", ascending=False).head(30)
+    descricoes_fmt = descricoes.copy()
+    descricoes_fmt["Valor"] = descricoes_fmt["Valor"].apply(moeda)
+
     return (
-        f"### Detalhamento de {conta}\n\n"
+        f"### Detalhamento — {titulo}\n\n"
         f"Período analisado: **{', '.join(ps)}**.\n\n"
-        f"Total da conta: **{moeda(total)}**.\n"
+        f"Total encontrado: **{moeda(total)}**.\n"
         f"Quantidade de lançamentos: **{len(dados)}**.\n"
         f"Principal plano de contas: **{top['Plano de contas']}**, com **{moeda(top['Valor'])}**.\n\n"
-        f"{df_para_markdown_tabela(resumo_fmt, 30)}"
+        f"#### Resumo por plano de contas\n"
+        f"{df_para_markdown_tabela(resumo_fmt, 30)}\n\n"
+        f"#### Evolução mensal\n"
+        f"{df_para_markdown_tabela(mensal_fmt, 48)}\n\n"
+        f"#### Detalhamento por descrição\n"
+        f"{df_para_markdown_tabela(descricoes_fmt, 30)}"
     )
-
 
 def responder_analise_projetos(pergunta, periodos_disponiveis):
     if projetos_chat.empty:
@@ -963,6 +1127,13 @@ def responder_pergunta_gerencial(pergunta):
         pct_receita = valor / receita * 100 if receita else 0
         pct_receb = valor / recebimento * 100 if recebimento else 0
         return f"A conta **{conta}** em {periodo} foi de **{moeda(valor)}**.\n\nRepresenta **{perc(pct_receita)}** da receita e **{perc(pct_receb)}** do recebimento do mês."
+
+    # Busca dinâmica por plano de contas quando o usuário cita uma despesa específica, como energia, aluguel, internet etc.
+    planos_encontrados = localizar_planos_contas_na_pergunta(pergunta)
+    if planos_encontrados and any(x in txt for x in ["DETALH", "PLANO", "CONTA", "DESPESA", "VALOR", "ENERGIA", "ALUGUEL", "AGUA", "ÁGUA", "INTERNET", "TELEFONE"]):
+        if any(x in txt for x in ["COMPAR", "EVOLUCAO", "EVOLUÇÃO", "VARIACAO", "VARIAÇÃO", "MES A MES", "MÊS A MÊS"]):
+            return responder_comparativo_despesa(pergunta, periodos_disponiveis)
+        return responder_detalhamento_conta(pergunta, periodos_disponiveis)
 
     if ("LUCRO" in txt or "RESULTADO" in txt) and "DFC" in txt:
         if not periodo:
@@ -1377,6 +1548,10 @@ elif pagina == "Perguntas e Respostas":
         "Qual foi o lucro no DRE de ABR/25?",
         "Qual foi o lucro no DFC de ABR/25?",
         "Qual foi o markup dos projetos em JAN/25?",
+        "Compare energia de OUT/25 a ABR/26.",
+        "Detalhe energia no período selecionado.",
+        "Compare aluguel de outubro a abril.",
+        "Detalhe o plano de contas Energia elétrica + água.",
     ]
 
     pergunta_modelo = st.selectbox(
