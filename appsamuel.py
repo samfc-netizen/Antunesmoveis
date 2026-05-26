@@ -975,6 +975,10 @@ def gerar_100_exemplos_perguntas():
         "Qual foi o faturamento de FEV/25?",
         "Qual foi o CMV de MAR/25?",
         "Qual foi a margem bruta de ABR/25?",
+        "Qual foi a margem bruta de 2025?",
+        "Qual foi a margem bruta de janeiro de 2025?",
+        "Compare a margem bruta de 2025 com 2026.",
+        "Qual foi o faturamento de 2025?",
         "Qual foi o percentual de CMV em MAI/25?",
         "Qual foi o lucro no DRE de JAN/25?",
         "Qual foi o resultado no DRE de FEV/25?",
@@ -1211,6 +1215,36 @@ def periodo_label_por_chave(ano, mes):
     return f"{MESES_ABREV[int(mes)]}/{str(int(ano))[-2:]}"
 
 
+def anos_mencionados_na_pergunta(pergunta):
+    """Extrai anos escritos como 2025/2026 ou 25/26 quando aparecem na pergunta."""
+    import re
+    txt = normalizar_texto(pergunta)
+    anos = []
+
+    for m in re.finditer(r"\b(20\d{2})\b", txt):
+        ano = int(m.group(1))
+        if 2000 <= ano <= 2099 and ano not in anos:
+            anos.append(ano)
+
+    # Aceita ano curto apenas quando houver pistas financeiras/temporais, para evitar confundir valores.
+    if not anos and any(x in txt for x in ["ANO", "ANOS", "MES", "MESES", "MARGEM", "RECEITA", "FATURAMENTO", "CMV", "DRE", "DFC", "RESULTADO", "COMPAR"]):
+        for m in re.finditer(r"\b(\d{2})\b", txt):
+            ano2 = int(m.group(1))
+            if 20 <= ano2 <= 99:
+                ano = 2000 + ano2
+                if ano not in anos:
+                    anos.append(ano)
+    return anos
+
+
+def periodo_pertence_a_ano(periodo, ano):
+    try:
+        ano_p, _ = periodo_chave(periodo)
+        return int(ano_p) == int(ano)
+    except Exception:
+        return False
+
+
 def meses_mencionados_com_posicao(pergunta):
     """Identifica meses escritos por extenso ou abreviados, preservando ordem na frase."""
     import re
@@ -1238,13 +1272,32 @@ def meses_mencionados_com_posicao(pergunta):
 
 
 def intervalo_periodos_por_meses(pergunta, periodos_disponiveis):
-    """Monta sequência completa entre dois meses, inclusive quando cruza ano.
-    Ex.: 'outubro até abril' => OUT/25, NOV/25, DEZ/25, JAN/26, FEV/26, MAR/26, ABR/26, se existir na base.
+    """Monta os períodos citados na pergunta.
+    Aceita ano inteiro (2025), mês + ano (janeiro de 2025), período curto (JAN/25)
+    e intervalos que cruzam ano, como OUT/25 a ABR/26.
     """
     txt = normalizar_texto(pergunta)
     todos = ordenar_periodos([p for p in periodos_disponiveis if p and "/" in str(p)])
     if not todos:
         return []
+
+    anos = anos_mencionados_na_pergunta(pergunta)
+    meses = meses_mencionados_com_posicao(pergunta)
+
+    # 0) Mês + ano explícito por extenso/abreviado: "margem de janeiro 2025" ou "margem jan 25".
+    # Antes o código pegava o mês mais recente e ignorava o ano.
+    if len(meses) == 1 and anos:
+        mes = meses[0][1]
+        candidatos = [p for p in todos if periodo_chave(p) == (anos[-1], mes)]
+        if candidatos:
+            return candidatos
+
+    # 0.1) Ano inteiro sem mês: "margem de 2025", "faturamento 2026".
+    # Retorna todos os meses daquele(s) ano(s) existentes na base.
+    if anos and not meses:
+        selecionados = [p for p in todos if any(periodo_pertence_a_ano(p, ano) for ano in anos)]
+        if selecionados:
+            return ordenar_periodos(selecionados)
 
     # 1) Se o usuário escreveu períodos explícitos, como OUT/25 a ABR/26
     explicitos = []
