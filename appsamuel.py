@@ -1516,7 +1516,7 @@ def executar_agente_bi(pergunta, periodos_contexto):
     return resultado
 
 
-def renderizar_resposta_bi(resultado):
+def renderizar_resposta_bi(resultado, chave_base="resposta"):
     if isinstance(resultado, str):
         st.markdown(resultado)
         return
@@ -1533,7 +1533,7 @@ def renderizar_resposta_bi(resultado):
     if texto:
         st.markdown(texto)
 
-    for titulo, dados, tipo in resultado.get("graficos", []):
+    for idx_grafico, (titulo, dados, tipo) in enumerate(resultado.get("graficos", [])):
         if isinstance(dados, pd.DataFrame) and not dados.empty and "PERIODO" in dados.columns:
             st.markdown(f"**{titulo}**")
             if tipo == "linha":
@@ -1541,11 +1541,11 @@ def renderizar_resposta_bi(resultado):
             else:
                 fig = px.bar(dados, x="PERIODO", y=dados.columns[-1], title=titulo)
             fig.update_layout(xaxis_title="Mês", yaxis_title="Valor")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"plotly_bi_{chave_base}_{idx_grafico}")
 
-    for titulo, tabela in resultado.get("tabelas", []):
+    for idx_tabela, (titulo, tabela) in enumerate(resultado.get("tabelas", [])):
         st.markdown(f"**{titulo}**")
-        st.dataframe(tabela, use_container_width=True, hide_index=True)
+        st.dataframe(tabela, use_container_width=True, hide_index=True, key=f"df_bi_{chave_base}_{idx_tabela}")
 
 
 periodos = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna())))
@@ -1942,10 +1942,10 @@ elif pagina == "Perguntas e Respostas":
         st.session_state.chat_gerencial.append({"role": "user", "content": pergunta})
         st.session_state.chat_gerencial.append({"role": "assistant", "content": resposta})
 
-    for msg in st.session_state.chat_gerencial:
+    for idx_msg, msg in enumerate(st.session_state.chat_gerencial):
         with st.chat_message(msg["role"]):
             if msg["role"] == "assistant":
-                renderizar_resposta_bi(msg["content"])
+                renderizar_resposta_bi(msg["content"], chave_base=f"msg_{idx_msg}")
             else:
                 st.markdown(msg["content"])
 
