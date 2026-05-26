@@ -595,10 +595,345 @@ def calcular_dfc_periodo(periodo):
     return {"periodo": periodo, "recebimento": recebimento, "saidas": saidas, "resultado_caixa": resultado}
 
 
+
+CONTAS_RESULTADO_PADRAO = [
+    "IMPOSTOS/deduções", "DESPESA COM PESSOAL", "DESPESAS OPERACIONAIS",
+    "DESPESAS FINANCEIRAS", "DESPESAS ADMINISTRATIVAS", "DESPESAS COMERCIAIS",
+    "FORNECEDORES", "AJUSTE", "APLICAÇÃO"
+]
+
+ALIAS_CONTAS_RESULTADO = {
+    "PESSOAL": "DESPESA COM PESSOAL",
+    "FOLHA": "DESPESA COM PESSOAL",
+    "SALARIO": "DESPESA COM PESSOAL",
+    "SALARIOS": "DESPESA COM PESSOAL",
+    "OPERACIONAL": "DESPESAS OPERACIONAIS",
+    "OPERACIONAIS": "DESPESAS OPERACIONAIS",
+    "FINANCEIRA": "DESPESAS FINANCEIRAS",
+    "FINANCEIRAS": "DESPESAS FINANCEIRAS",
+    "ADMINISTRATIVA": "DESPESAS ADMINISTRATIVAS",
+    "ADMINISTRATIVAS": "DESPESAS ADMINISTRATIVAS",
+    "COMERCIAL": "DESPESAS COMERCIAIS",
+    "COMERCIAIS": "DESPESAS COMERCIAIS",
+    "IMPOSTO": "IMPOSTOS/deduções",
+    "IMPOSTOS": "IMPOSTOS/deduções",
+    "DEDUCAO": "IMPOSTOS/deduções",
+    "DEDUCOES": "IMPOSTOS/deduções",
+    "FORNECEDOR": "FORNECEDORES",
+    "FORNECEDORES": "FORNECEDORES",
+    "AJUSTE": "AJUSTE",
+    "AJUSTES": "AJUSTE",
+    "APLICACAO": "APLICAÇÃO",
+    "APLICACOES": "APLICAÇÃO",
+}
+
+
+def localizar_conta_resultado_na_pergunta(pergunta):
+    txt = normalizar_texto(pergunta)
+    for alias, conta in ALIAS_CONTAS_RESULTADO.items():
+        if alias in txt:
+            return conta
+    contas_base = sorted([c for c in confirmadas["CONTA_RESULTADO"].dropna().unique() if str(c).strip()])
+    for conta in contas_base:
+        conta_norm = normalizar_texto(conta)
+        if conta_norm and conta_norm in txt:
+            return conta
+    return None
+
+
+def periodos_da_pergunta(pergunta, periodos_disponiveis):
+    """Extrai um ou mais períodos da pergunta. Se encontrar intervalo, retorna os meses do intervalo."""
+    txt = normalizar_texto(pergunta)
+    achados = []
+    for p in periodos_disponiveis:
+        mes, ano = p.split("/")
+        padroes = [p, p.replace("/", " "), p.replace("/", "-"), f"{mes}/{ano}"]
+        if any(normalizar_texto(x) in txt for x in padroes):
+            achados.append(p)
+    primeiro = extrair_periodo_da_pergunta(pergunta, periodos_disponiveis)
+    if primeiro and primeiro not in achados:
+        achados.append(primeiro)
+    achados = ordenar_periodos(achados)
+    if len(achados) >= 2 and any(x in txt for x in [" A ", "ATE", "ATÉ", "ENTRE", "COMPAR", "VERSUS", "VS"]):
+        todos = ordenar_periodos(periodos_disponiveis)
+        i1, i2 = todos.index(achados[0]), todos.index(achados[-1])
+        if i1 <= i2:
+            return todos[i1:i2+1]
+    return achados
+
+
+def df_para_markdown_tabela(df, max_linhas=20):
+    if df is None or df.empty:
+        return "Sem dados para exibir."
+    return df.head(max_linhas).to_markdown(index=False)
+
+
+def resumo_conta_por_periodo(conta, periodos_ref=None):
+    periodos_ref = periodos_ref or ordenar_periodos(confirmadas["PERIODO"].dropna().unique())
+    dados = confirmadas[
+        (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
+        (confirmadas["PERIODO"].isin(periodos_ref))
+    ].copy()
+    resumo = dados.groupby("PERIODO", as_index=False)["Valor total"].sum()
+    todos = pd.DataFrame({"PERIODO": periodos_ref})
+    resumo = todos.merge(resumo, on="PERIODO", how="left").fillna({"Valor total": 0})
+    resumo["ORDEM"] = resumo["PERIODO"].apply(lambda p: periodos_ref.index(p) if p in periodos_ref else 999)
+    resumo = resumo.sort_values("ORDEM").drop(columns=["ORDEM"])
+    return resumo
+
+
+def responder_comparativo_despesa(pergunta, periodos_disponiveis):
+    conta = localizar_conta_resultado_na_pergunta(pergunta)
+    if not conta:
+        return "Identifiquei que você quer um comparativo, mas não consegui localizar a conta de resultado. Exemplo: 'Compare despesas com pessoal de JAN/25 a MAR/25'."
+    ps = periodos_da_pergunta(pergunta, periodos_disponiveis)
+    if not ps:
+        ps = periodos_disponiveis
+    resumo = resumo_conta_por_periodo(conta, ps)
+    total = resumo["Valor total"].sum()
+    media = resumo["Valor total"].mean() if len(resumo) else 0
+    maior = resumo.sort_values("Valor total", ascending=False).iloc[0] if not resumo.empty else None
+    menor = resumo.sort_values("Valor total", ascending=True).iloc[0] if not resumo.empty else None
+    resumo_fmt = resumo.copy()
+    resumo_fmt["Valor"] = resumo_fmt["Valor total"].apply(moeda)
+    resumo_fmt = resumo_fmt[["PERIODO", "Valor"]]
+    variacao_txt = ""
+    if len(resumo) >= 2:
+        ini = resumo.iloc[0]["Valor total"]
+        fim = resumo.iloc[-1]["Valor total"]
+        var = fim - ini
+        var_pct = (var / ini * 100) if ini else 0
+        variacao_txt = f"\n\nVariação do primeiro para o último período: **{moeda(var)}** ({perc(var_pct)})."
+    return (
+        f"### Comparativo de {conta}\n\n"
+        f"Período analisado: **{', '.join(ps)}**.\n\n"
+        f"Total: **{moeda(total)}**.\n"
+        f"Média mensal: **{moeda(media)}**.\n"
+        f"Maior mês: **{maior['PERIODO']}**, com **{moeda(maior['Valor total'])}**.\n"
+        f"Menor mês: **{menor['PERIODO']}**, com **{moeda(menor['Valor total'])}**."
+        f"{variacao_txt}\n\n"
+        f"{df_para_markdown_tabela(resumo_fmt, 36)}"
+    )
+
+
+def responder_detalhamento_conta(pergunta, periodos_disponiveis):
+    conta = localizar_conta_resultado_na_pergunta(pergunta)
+    if not conta:
+        return "Identifiquei que você quer um detalhamento, mas não consegui localizar a conta de resultado. Exemplo: 'Detalhe as despesas com pessoal de JAN/25'."
+    ps = periodos_da_pergunta(pergunta, periodos_disponiveis)
+    if not ps:
+        ps = periodos_disponiveis
+    dados = confirmadas[
+        (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) &
+        (confirmadas["PERIODO"].isin(ps))
+    ].copy()
+    if dados.empty:
+        return f"Não encontrei lançamentos para **{conta}** no período solicitado."
+    resumo = dados.groupby("Plano de contas", as_index=False).agg(
+        Qtd=("Valor total", "count"),
+        Valor=("Valor total", "sum")
+    ).sort_values("Valor", ascending=False)
+    total = resumo["Valor"].sum()
+    resumo["% sobre conta"] = np.where(total != 0, resumo["Valor"] / total * 100, 0)
+    resumo_fmt = resumo.copy()
+    resumo_fmt["Valor"] = resumo_fmt["Valor"].apply(moeda)
+    resumo_fmt["% sobre conta"] = resumo_fmt["% sobre conta"].apply(perc)
+    top = resumo.iloc[0]
+    return (
+        f"### Detalhamento de {conta}\n\n"
+        f"Período analisado: **{', '.join(ps)}**.\n\n"
+        f"Total da conta: **{moeda(total)}**.\n"
+        f"Quantidade de lançamentos: **{len(dados)}**.\n"
+        f"Principal plano de contas: **{top['Plano de contas']}**, com **{moeda(top['Valor'])}**.\n\n"
+        f"{df_para_markdown_tabela(resumo_fmt, 30)}"
+    )
+
+
+def responder_analise_projetos(pergunta, periodos_disponiveis):
+    if projetos_chat.empty:
+        return "Não consegui preparar a aba PROJETOS. Verifique se existem as colunas MÊS, ANO, PROJETO/CLIENTE, RECEITA e CMV."
+    ps = periodos_da_pergunta(pergunta, sorted(projetos_chat["PERIODO"].dropna().unique()))
+    base = projetos_chat.copy()
+    contexto = "base completa de projetos"
+    if ps:
+        base = base[base["PERIODO"].isin(ps)].copy()
+        contexto = ", ".join(ps)
+    if base.empty:
+        return f"Não encontrei projetos para {contexto}."
+    receita = base["RECEITA_NUM"].sum()
+    cmv = base["CMV_NUM"].sum()
+    margem = base["MARGEM_RS_NUM"].sum()
+    markup = receita / cmv if cmv else 0
+    margem_pct = margem / receita * 100 if receita else 0
+    cmv_pct = cmv / receita * 100 if receita else 0
+    ranking = base.groupby("PROJETO_NOME", as_index=False).agg(
+        Receita=("RECEITA_NUM", "sum"),
+        CMV=("CMV_NUM", "sum"),
+        Margem=("MARGEM_RS_NUM", "sum"),
+    )
+    ranking["Markup"] = np.where(ranking["CMV"] != 0, ranking["Receita"] / ranking["CMV"], 0)
+    ranking["Margem %"] = np.where(ranking["Receita"] != 0, ranking["Margem"] / ranking["Receita"] * 100, 0)
+    ranking = ranking.sort_values("Margem", ascending=False)
+    top_margem = ranking.iloc[0]
+    top_receita = ranking.sort_values("Receita", ascending=False).iloc[0]
+    ranking_fmt = ranking.head(10).copy()
+    for c in ["Receita", "CMV", "Margem"]:
+        ranking_fmt[c] = ranking_fmt[c].apply(moeda)
+    ranking_fmt["Markup"] = ranking_fmt["Markup"].apply(numero)
+    ranking_fmt["Margem %"] = ranking_fmt["Margem %"].apply(perc)
+    diagnostico = ""
+    if margem_pct < 20:
+        diagnostico = "A margem percentual está baixa. Vale revisar precificação, composição de custo e descontos concedidos nos projetos."
+    elif margem_pct < 35:
+        diagnostico = "A margem está em faixa intermediária. Há espaço para melhorar markup em projetos de maior volume."
+    else:
+        diagnostico = "A margem geral dos projetos está saudável, desde que os custos estejam corretamente alocados."
+    return (
+        f"### Análise de Projetos — {contexto}\n\n"
+        f"Receita total: **{moeda(receita)}**.\n"
+        f"Custo/CMV total: **{moeda(cmv)}** ({perc(cmv_pct)} da receita).\n"
+        f"Margem bruta: **{moeda(margem)}** ({perc(margem_pct)}).\n"
+        f"Markup médio: **{numero(markup)}**.\n\n"
+        f"Projeto/cliente com maior receita: **{top_receita['PROJETO_NOME']}**, com **{moeda(top_receita['Receita'])}**.\n"
+        f"Projeto/cliente com maior margem: **{top_margem['PROJETO_NOME']}**, com **{moeda(top_margem['Margem'])}**.\n\n"
+        f"**Leitura gerencial:** {diagnostico}\n\n"
+        f"#### Top 10 projetos por margem\n"
+        f"{df_para_markdown_tabela(ranking_fmt, 10)}"
+    )
+
+
+def gerar_100_exemplos_perguntas():
+    meses_ex = ["JAN/25", "FEV/25", "MAR/25", "ABR/25", "MAI/25", "JUN/25"]
+    contas_ex = ["despesas com pessoal", "despesas operacionais", "despesas financeiras", "despesas administrativas", "despesas comerciais", "impostos", "fornecedores", "ajustes", "aplicações"]
+    perguntas = []
+    perguntas += [
+        "Qual foi a receita de JAN/25?",
+        "Qual foi o faturamento de FEV/25?",
+        "Qual foi o CMV de MAR/25?",
+        "Qual foi a margem bruta de ABR/25?",
+        "Qual foi o percentual de CMV em MAI/25?",
+        "Qual foi o lucro no DRE de JAN/25?",
+        "Qual foi o resultado no DRE de FEV/25?",
+        "Qual foi o lucro no DFC de MAR/25?",
+        "Qual foi o resultado de caixa de ABR/25?",
+        "Qual foi o recebimento de MAI/25?",
+    ]
+    for conta in contas_ex:
+        perguntas.append(f"Qual foi o valor de {conta} em JAN/25?")
+        perguntas.append(f"Detalhe {conta} em FEV/25.")
+        perguntas.append(f"Compare {conta} de JAN/25 a MAR/25.")
+        perguntas.append(f"Qual foi a média de {conta} no período selecionado?")
+        perguntas.append(f"Qual mês teve maior valor de {conta}?")
+    perguntas += [
+        "Faça uma análise dos projetos.",
+        "Faça uma análise dos projetos de JAN/25.",
+        "Qual projeto teve maior receita?",
+        "Qual projeto teve maior margem?",
+        "Qual projeto teve menor margem percentual?",
+        "Qual foi o markup dos projetos em JAN/25?",
+        "Qual foi o markup médio dos projetos?",
+        "Liste os 10 maiores projetos por receita.",
+        "Liste os 10 maiores projetos por margem.",
+        "Qual cliente/projeto mais consumiu CMV?",
+        "Qual cliente/projeto teve melhor markup?",
+        "Qual cliente/projeto teve pior markup?",
+        "Analise receita, custo, margem e markup dos projetos de MAR/25.",
+        "Qual foi a margem percentual dos projetos de ABR/25?",
+        "Compare os projetos de JAN/25 a MAR/25.",
+        "Qual foi a participação do CMV nos projetos?",
+        "Qual projeto merece atenção por margem baixa?",
+        "Qual foi o cliente que mais deu margem?",
+        "Qual foi o cliente que mais deu margem em JAN/25?",
+        "Qual foi a representatividade do maior projeto na receita total?",
+    ]
+    perguntas += [
+        "Compare receita de JAN/25 a MAR/25.",
+        "Compare resultado DRE de JAN/25 a MAR/25.",
+        "Compare resultado DFC de JAN/25 a MAR/25.",
+        "Quais foram os meses com resultado DRE negativo?",
+        "Quais foram os meses com resultado de caixa negativo?",
+        "Qual mês teve maior receita?",
+        "Qual mês teve menor receita?",
+        "Qual mês teve maior margem bruta?",
+        "Qual mês teve pior resultado DRE?",
+        "Qual mês teve pior resultado DFC?",
+        "Faça uma análise geral do DRE.",
+        "Faça uma análise geral do DFC.",
+        "Faça uma análise geral do período selecionado.",
+        "Quais contas mais pesaram no DRE?",
+        "Quais contas mais pesaram no DFC?",
+        "Qual despesa representa mais sobre a receita?",
+        "Qual saída representa mais sobre o recebimento?",
+        "Qual foi o ponto de atenção do mês JAN/25?",
+        "Qual despesa cresceu mais no período?",
+        "Qual despesa reduziu mais no período?",
+    ]
+    perguntas += [
+        "Detalhe despesas com pessoal por plano de contas.",
+        "Detalhe despesas operacionais por plano de contas.",
+        "Detalhe despesas financeiras por plano de contas.",
+        "Detalhe despesas administrativas por plano de contas.",
+        "Detalhe despesas comerciais por plano de contas.",
+        "Detalhe impostos por plano de contas.",
+        "Detalhe fornecedores por plano de contas.",
+        "Quais são os principais planos dentro de despesas com pessoal?",
+        "Quais são os principais planos dentro de despesas operacionais?",
+        "Quais são os principais planos dentro de despesas financeiras?",
+    ]
+    perguntas += [
+        "Qual foi a necessidade média de caixa?",
+        "Qual foi a média mensal de despesas com pessoal?",
+        "Qual foi a média mensal de fornecedores?",
+        "Qual foi a média mensal de impostos?",
+        "Qual conta pesa mais no ponto de equilíbrio?",
+        "Qual seria a necessidade semanal de caixa?",
+        "Qual seria a necessidade diária de caixa?",
+        "Quais contas devo acompanhar com mais atenção?",
+        "Onde posso reduzir despesas?",
+        "O resultado está saudável?",
+        "A margem bruta está boa?",
+        "O CMV está alto?",
+        "As despesas com pessoal estão pesando muito?",
+        "As despesas operacionais estão fora do padrão?",
+        "As despesas financeiras estão altas?",
+        "Os impostos estão representando quanto da receita?",
+        "Fornecedores estão pesando quanto no caixa?",
+        "Faça um resumo executivo do mês JAN/25.",
+        "Faça um resumo executivo do período selecionado.",
+        "Quais são os principais riscos financeiros do período?",
+        "Quais são as principais oportunidades de melhoria?",
+        "Me dê uma análise para reunião de diretoria.",
+        "Me dê uma análise curta para WhatsApp.",
+        "O que mais impactou o resultado?",
+        "O que mais impactou o caixa?",
+    ]
+    # Garante pelo menos 100 e remove duplicidades preservando ordem.
+    unicas = []
+    for p in perguntas:
+        if p not in unicas:
+            unicas.append(p)
+    return unicas[:100]
+
+
 def responder_pergunta_gerencial(pergunta):
     txt = normalizar_texto(pergunta)
     periodos_disponiveis = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna()) | set(projetos_chat["PERIODO"].dropna() if not projetos_chat.empty else [])))
     periodo = extrair_periodo_da_pergunta(pergunta, periodos_disponiveis)
+
+    # Detalhamento por Conta de Resultado
+    if any(x in txt for x in ["DETALH", "ABRA", "ABRIR", "PLANOS DE CONTAS", "POR PLANO", "PRINCIPAIS PLANOS"]):
+        return responder_detalhamento_conta(pergunta, periodos_disponiveis)
+
+    # Comparativos de qualquer despesa/conta
+    if any(x in txt for x in ["COMPAR", "EVOLUCAO", "EVOLUÇÃO", "VARIACAO", "VARIAÇÃO", "MES A MES", "MÊS A MÊS"]):
+        if any(x in txt for x in ["PROJETO", "CLIENTE"]):
+            return responder_analise_projetos(pergunta, periodos_disponiveis)
+        return responder_comparativo_despesa(pergunta, periodos_disponiveis)
+
+    # Análise textual de projetos
+    if "PROJETO" in txt or ("CLIENTE" in txt and any(x in txt for x in ["MARGEM", "MARKUP", "RECEITA", "CMV"])):
+        if "MARKUP" not in txt and any(x in txt for x in ["ANALISE", "ANALISAR", "RESUMO", "DETALH", "RECEITA", "CUSTO", "CMV", "MARGEM"]):
+            return responder_analise_projetos(pergunta, periodos_disponiveis)
 
     if any(palavra in txt for palavra in ["RECEITA", "FATURAMENTO"]):
         if not periodo:
@@ -609,21 +944,25 @@ def responder_pergunta_gerencial(pergunta):
         margem_pct = margem / valor * 100 if valor else 0
         return f"A receita de {periodo} foi de **{moeda(valor)}**.\n\nCMV: **{moeda(cmv)}**.\nMargem bruta: **{moeda(margem)}** ({perc(margem_pct)})."
 
-    if "PESSOAL" in txt:
+    if "CMV" in txt or "CUSTO" in txt:
         if not periodo:
-            return "Não identifiquei o mês/ano na pergunta. Exemplo: 'Qual foi a despesa com pessoal de FEV/25?'"
-        valor = confirmadas[(confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto("DESPESA COM PESSOAL")) & (confirmadas["PERIODO"] == periodo)]["Valor total"].sum()
+            return "Não identifiquei o mês/ano na pergunta. Exemplo: 'Qual foi o CMV de JAN/25?'"
         receita = receita_cmv.loc[receita_cmv["PERIODO"] == periodo, "RECEITA"].sum()
-        representatividade = valor / receita * 100 if receita else 0
-        return f"A despesa com pessoal em {periodo} foi de **{moeda(valor)}**.\n\nIsso representa **{perc(representatividade)}** da receita do mês."
+        cmv = receita_cmv.loc[receita_cmv["PERIODO"] == periodo, "CMV"].sum()
+        pct = cmv / receita * 100 if receita else 0
+        return f"O CMV/custo de {periodo} foi de **{moeda(cmv)}**, representando **{perc(pct)}** da receita."
 
-    if "OPERACION" in txt:
+    # Valor simples de qualquer conta de resultado
+    conta = localizar_conta_resultado_na_pergunta(pergunta)
+    if conta:
         if not periodo:
-            return "Não identifiquei o mês/ano na pergunta. Exemplo: 'Qual foi a despesa operacional de MAR/25?'"
-        valor = confirmadas[(confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto("DESPESAS OPERACIONAIS")) & (confirmadas["PERIODO"] == periodo)]["Valor total"].sum()
+            return responder_detalhamento_conta(pergunta, periodos_disponiveis)
+        valor = confirmadas[(confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(conta)) & (confirmadas["PERIODO"] == periodo)]["Valor total"].sum()
         receita = receita_cmv.loc[receita_cmv["PERIODO"] == periodo, "RECEITA"].sum()
-        representatividade = valor / receita * 100 if receita else 0
-        return f"As despesas operacionais em {periodo} foram de **{moeda(valor)}**.\n\nIsso representa **{perc(representatividade)}** da receita do mês."
+        recebimento = recebimentos.loc[recebimentos["PERIODO"] == periodo, "RECEBIMENTO"].sum()
+        pct_receita = valor / receita * 100 if receita else 0
+        pct_receb = valor / recebimento * 100 if recebimento else 0
+        return f"A conta **{conta}** em {periodo} foi de **{moeda(valor)}**.\n\nRepresenta **{perc(pct_receita)}** da receita e **{perc(pct_receb)}** do recebimento do mês."
 
     if ("LUCRO" in txt or "RESULTADO" in txt) and "DFC" in txt:
         if not periodo:
@@ -639,26 +978,17 @@ def responder_pergunta_gerencial(pergunta):
         pct = d["resultado_dre"] / d["receita"] * 100 if d["receita"] else 0
         return f"O resultado/lucro no DRE em {periodo} foi de **{moeda(d['resultado_dre'])}**.\n\nReceita: **{moeda(d['receita'])}**.\nCMV: **{moeda(d['cmv'])}**.\nDespesas DRE: **{moeda(sum(d['despesas'].values()))}**.\nResultado sobre receita: **{perc(pct)}**."
 
-    if "MARGEM" in txt and any(x in txt for x in ["CLIENTE", "PROJETO"]):
-        if projetos_chat.empty:
-            return "Não consegui preparar a aba PROJETOS para analisar margem por cliente/projeto. Verifique as colunas MÊS, ANO, PROJETO/CLIENTE, RECEITA e CMV."
-        base = projetos_chat.copy()
-        if periodo:
-            base = base[base["PERIODO"] == periodo].copy()
-        if base.empty:
-            return f"Não encontrei projetos para {periodo}."
-        ranking = base.groupby("PROJETO_NOME", as_index=False).agg(RECEITA=("RECEITA_NUM", "sum"), CMV=("CMV_NUM", "sum"), MARGEM=("MARGEM_RS_NUM", "sum"))
-        ranking["MARGEM_%"] = np.where(ranking["RECEITA"] != 0, ranking["MARGEM"] / ranking["RECEITA"] * 100, 0)
-        ranking = ranking.sort_values("MARGEM", ascending=False)
-        top = ranking.iloc[0]
-        contexto = f" em {periodo}" if periodo else " no período total da base de projetos"
-        return f"O cliente/projeto que mais gerou margem{contexto} foi **{top['PROJETO_NOME']}**.\n\nReceita: **{moeda(top['RECEITA'])}**.\nCMV: **{moeda(top['CMV'])}**.\nMargem bruta: **{moeda(top['MARGEM'])}** ({perc(top['MARGEM_%'])})."
+    if "RECEBIMENTO" in txt or "RECEBIMENTOS" in txt:
+        if not periodo:
+            return "Não identifiquei o mês/ano na pergunta. Exemplo: 'Qual foi o recebimento de JAN/25?'"
+        valor = recebimentos.loc[recebimentos["PERIODO"] == periodo, "RECEBIMENTO"].sum()
+        return f"O recebimento de {periodo} foi de **{moeda(valor)}**."
 
     if "MARKUP" in txt:
         if projetos_chat.empty:
             return "Não consegui preparar a aba PROJETOS para analisar markup. Verifique as colunas MÊS, ANO, PROJETO/CLIENTE, RECEITA e CMV."
         if not periodo:
-            return "Não identifiquei o mês/ano na pergunta. Exemplo: 'Qual foi o markup de JAN/25 em projetos?'"
+            return responder_analise_projetos(pergunta, periodos_disponiveis)
         base = projetos_chat[projetos_chat["PERIODO"] == periodo].copy()
         receita = base["RECEITA_NUM"].sum()
         cmv = base["CMV_NUM"].sum()
@@ -667,7 +997,28 @@ def responder_pergunta_gerencial(pergunta):
         margem_pct = margem / receita * 100 if receita else 0
         return f"O markup dos projetos em {periodo} foi de **{numero(markup)}**.\n\nReceita de projetos: **{moeda(receita)}**.\nCMV de projetos: **{moeda(cmv)}**.\nMargem: **{moeda(margem)}** ({perc(margem_pct)})."
 
-    return "Ainda não tenho uma rota pronta para essa pergunta. Teste perguntas como: receita do mês, despesas com pessoal, despesas operacionais, lucro DRE, lucro DFC, cliente que mais deu margem ou markup dos projetos."
+    if any(x in txt for x in ["ANALISE GERAL", "RESUMO EXECUTIVO", "DIRETORIA", "SAUDAVEL", "RISCO", "OPORTUNIDADE"]):
+        ps = periodos_da_pergunta(pergunta, periodos_disponiveis) or periodos
+        receita = receita_cmv[receita_cmv["PERIODO"].isin(ps)]["RECEITA"].sum()
+        cmv = receita_cmv[receita_cmv["PERIODO"].isin(ps)]["CMV"].sum()
+        receb = recebimentos[recebimentos["PERIODO"].isin(ps)]["RECEBIMENTO"].sum()
+        saidas = confirmadas[confirmadas["PERIODO"].isin(ps) & confirmadas["CONTA_RESULTADO_NORM"].isin([normalizar_texto(c) for c in CONTAS_RESULTADO_PADRAO])]["Valor total"].sum()
+        margem = receita - cmv
+        resultado_dre = receita - cmv - confirmadas[confirmadas["PERIODO"].isin(ps) & confirmadas["CONTA_RESULTADO_NORM"].isin([normalizar_texto(c) for c in CONTAS_RESULTADO_PADRAO if c != "FORNECEDORES"])] ["Valor total"].sum()
+        resultado_caixa = receb - saidas
+        return (
+            f"### Resumo executivo — {', '.join(ps)}\n\n"
+            f"Receita: **{moeda(receita)}**.\n"
+            f"CMV: **{moeda(cmv)}**.\n"
+            f"Margem bruta: **{moeda(margem)}** ({perc(margem/receita*100 if receita else 0)}).\n"
+            f"Resultado DRE estimado: **{moeda(resultado_dre)}**.\n"
+            f"Recebimento: **{moeda(receb)}**.\n"
+            f"Saídas DFC: **{moeda(saidas)}**.\n"
+            f"Resultado de caixa estimado: **{moeda(resultado_caixa)}**.\n\n"
+            f"**Leitura gerencial:** acompanhe principalmente as contas com maior peso sobre receita/recebimento e valide se o resultado de caixa acompanha o resultado econômico."
+        )
+
+    return "Ainda não tenho uma rota pronta para essa pergunta. Abra a lista de exemplos e teste perguntas sobre receita, CMV, despesas, comparativos, detalhamento de contas, DRE, DFC ou projetos."
 
 periodos = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna())))
 periodos = [p for p in periodos if p and p != "/"]
@@ -697,7 +1048,7 @@ sem_classificacao_periodo = sem_classificacao[sem_classificacao["PERIODO"].isin(
 receita_cmv_periodo = receita_cmv[receita_cmv["PERIODO"].isin(periodos)].copy()
 recebimentos_periodo_df = recebimentos[recebimentos["PERIODO"].isin(periodos)].copy()
 
-pagina = st.sidebar.radio("Multipages", ["DRE", "DFC", "Projetos", "Perguntas e Respostas", "Ponto de Equilíbrio"])
+pagina = st.sidebar.radio("Multipages", ["DRE", "DFC", "Projetos", "Ponto de Equilíbrio", "Perguntas e Respostas"])
 
 # ============================================================
 # DRE
@@ -981,34 +1332,77 @@ elif pagina == "Projetos":
 # PERGUNTAS E RESPOSTAS
 # ============================================================
 elif pagina == "Perguntas e Respostas":
-    st.header("Perguntas e Respostas Gerenciais")
-    st.caption("Camada rápida de perguntas sobre DRE, DFC e Projetos. O cálculo é feito com Pandas, sem depender de IA externa.")
+    st.markdown(
+        """
+        <div style="padding:24px;border-radius:18px;background:linear-gradient(135deg,#0B5ED7,#0A2E57);color:white;margin-bottom:18px;">
+            <h1 style="margin:0;font-size:34px;">Perguntas e Respostas Gerenciais</h1>
+            <p style="font-size:17px;margin-top:8px;margin-bottom:0;">
+                Converse com o DRE, DFC, Projetos e Contas de Resultado. O cálculo é feito diretamente na base, com respostas rápidas e gerenciais.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    exemplos = [
-        "Qual foi a receita de JAN/25?",
-        "Qual foi a despesa com pessoal de FEV/25?",
-        "Qual foi a despesa operacional de MAR/25?",
+    st.caption("Essa página fica por último no menu e funciona como uma camada de consulta rápida sobre os dados do dashboard.")
+
+    exemplos = gerar_100_exemplos_perguntas()
+
+    cta1, cta2, cta3 = st.columns(3)
+    cta1.metric("Rotas de perguntas", "100+")
+    cta2.metric("Bases consultadas", "DRE | DFC | Projetos")
+    cta3.metric("Modo", "Rápido via Pandas")
+
+    st.info(
+        "Você pode perguntar em linguagem natural. Exemplos: "
+        "'Compare despesas com pessoal de JAN/25 a MAR/25', "
+        "'Detalhe despesas operacionais', ou "
+        "'Faça uma análise dos projetos'."
+    )
+
+    with st.expander("Ver 100 exemplos de perguntas que o usuário pode fazer", expanded=False):
+        col_a, col_b = st.columns(2)
+        metade = int(np.ceil(len(exemplos) / 2))
+        with col_a:
+            for i, ex in enumerate(exemplos[:metade], start=1):
+                st.markdown(f"**{i}.** {ex}")
+        with col_b:
+            for i, ex in enumerate(exemplos[metade:], start=metade + 1):
+                st.markdown(f"**{i}.** {ex}")
+
+    sugestoes = [
+        "Compare despesas com pessoal de JAN/25 a MAR/25.",
+        "Detalhe as despesas operacionais por plano de contas.",
+        "Faça uma análise dos projetos de JAN/25.",
         "Qual foi o lucro no DRE de ABR/25?",
         "Qual foi o lucro no DFC de ABR/25?",
-        "Qual foi o cliente que mais deu margem?",
-        "Qual foi o cliente que mais deu margem em JAN/25?",
-        "Qual foi o markup de JAN/25 em relação aos projetos?",
+        "Qual foi o markup dos projetos em JAN/25?",
     ]
 
-    with st.expander("Ver exemplos de perguntas", expanded=True):
-        for ex in exemplos:
-            st.markdown(f"- {ex}")
+    pergunta_modelo = st.selectbox(
+        "Perguntas prontas para testar",
+        options=[""] + sugestoes,
+        index=0,
+        help="Escolha uma pergunta pronta ou digite livremente no chat abaixo."
+    )
 
     if "chat_gerencial" not in st.session_state:
         st.session_state.chat_gerencial = []
-
-    pergunta = st.chat_input("Digite sua pergunta sobre DRE, DFC ou Projetos...")
 
     col1, col2 = st.columns([1, 4])
     with col1:
         if st.button("Limpar conversa", use_container_width=True):
             st.session_state.chat_gerencial = []
             st.rerun()
+
+    if pergunta_modelo:
+        if st.button("Enviar pergunta pronta", use_container_width=True):
+            resposta = responder_pergunta_gerencial(pergunta_modelo)
+            st.session_state.chat_gerencial.append({"role": "user", "content": pergunta_modelo})
+            st.session_state.chat_gerencial.append({"role": "assistant", "content": resposta})
+            st.rerun()
+
+    pergunta = st.chat_input("Digite sua pergunta sobre DRE, DFC, despesas ou projetos...")
 
     if pergunta:
         resposta = responder_pergunta_gerencial(pergunta)
