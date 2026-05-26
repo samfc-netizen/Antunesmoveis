@@ -1191,6 +1191,363 @@ def responder_pergunta_gerencial(pergunta):
 
     return "Ainda não tenho uma rota pronta para essa pergunta. Abra a lista de exemplos e teste perguntas sobre receita, CMV, despesas, comparativos, detalhamento de contas, DRE, DFC ou projetos."
 
+
+
+# ============================================================
+# AGENTE DE BI CONVERSACIONAL - ROTEADOR + PANDAS
+# ============================================================
+
+def periodo_chave(periodo):
+    """Converte JAN/25 em chave numérica (2025, 1)."""
+    try:
+        mes_abrev, ano2 = str(periodo).split("/")
+        inv = {v: k for k, v in MESES_ABREV.items()}
+        return (2000 + int(ano2), inv.get(mes_abrev.upper(), 99))
+    except Exception:
+        return (9999, 99)
+
+
+def periodo_label_por_chave(ano, mes):
+    return f"{MESES_ABREV[int(mes)]}/{str(int(ano))[-2:]}"
+
+
+def meses_mencionados_com_posicao(pergunta):
+    """Identifica meses escritos por extenso ou abreviados, preservando ordem na frase."""
+    import re
+    txt = normalizar_texto(pergunta)
+    mapa = {}
+    for nome, num in MESES_ORDEM.items():
+        mapa[normalizar_texto(nome)] = num
+    for num, abrev in MESES_ABREV.items():
+        mapa[normalizar_texto(abrev)] = num
+
+    achados = []
+    for token, mes_num in mapa.items():
+        for m in re.finditer(rf"\b{re.escape(token)}\b", txt):
+            achados.append((m.start(), mes_num, token))
+    achados = sorted(achados, key=lambda x: x[0])
+
+    # Evita duplicidade MAR/MARCO no mesmo ponto quando ocorrer
+    limpos = []
+    pos_usadas = set()
+    for pos, mes, token in achados:
+        if pos not in pos_usadas:
+            limpos.append((pos, mes, token))
+            pos_usadas.add(pos)
+    return limpos
+
+
+def intervalo_periodos_por_meses(pergunta, periodos_disponiveis):
+    """Monta sequência completa entre dois meses, inclusive quando cruza ano.
+    Ex.: 'outubro até abril' => OUT/25, NOV/25, DEZ/25, JAN/26, FEV/26, MAR/26, ABR/26, se existir na base.
+    """
+    txt = normalizar_texto(pergunta)
+    todos = ordenar_periodos([p for p in periodos_disponiveis if p and "/" in str(p)])
+    if not todos:
+        return []
+
+    # 1) Se o usuário escreveu períodos explícitos, como OUT/25 a ABR/26
+    explicitos = []
+    for p in todos:
+        formas = [p, p.replace("/", " "), p.replace("/", "-")]
+        if any(normalizar_texto(f) in txt for f in formas):
+            explicitos.append(p)
+    explicitos = ordenar_periodos(explicitos)
+    if len(explicitos) >= 2:
+        i1, i2 = todos.index(explicitos[0]), todos.index(explicitos[-1])
+        if i1 <= i2:
+            return todos[i1:i2 + 1]
+        return todos[i2:i1 + 1]
+    if len(explicitos) == 1:
+        return explicitos
+
+    # 2) Se escreveu mês por extenso, como outubro a abril
+    meses = meses_mencionados_com_posicao(pergunta)
+    if len(meses) >= 2 and any(x in txt for x in [" A ", "ATE", "ATÉ", "ENTRE", "COMPAR", "EVOLU", "VARIAC"]):
+        mes_ini = meses[0][1]
+        mes_fim = meses[-1][1]
+        chaves = [periodo_chave(p) for p in todos]
+        candidatos = []
+
+        for i, (ano_i, mes_i) in enumerate(chaves):
+            if mes_i != mes_ini:
+                continue
+            for j in range(i, len(chaves)):
+                ano_j, mes_j = chaves[j]
+                if mes_j == mes_fim:
+                    seq = todos[i:j + 1]
+                    # Evita intervalos gigantes por engano
+                    if 1 <= len(seq) <= 18:
+                        candidatos.append(seq)
+
+        if candidatos:
+            # Preferir o intervalo mais curto; em empate, o mais recente
+            candidatos = sorted(candidatos, key=lambda s: (len(s), periodo_chave(s[0])), reverse=False)
+            menor_tamanho = len(candidatos[0])
+            menores = [c for c in candidatos if len(c) == menor_tamanho]
+            return sorted(menores, key=lambda s: periodo_chave(s[0]), reverse=True)[0]
+
+    # 3) Um único mês sem ano: tenta o período filtrado; se tiver mais de um, usa o mais recente
+    if len(meses) == 1:
+        mes = meses[0][1]
+        candidatos = [p for p in todos if periodo_chave(p)[1] == mes]
+        if candidatos:
+            return [ordenar_periodos(candidatos)[-1]]
+
+    # 4) Fallback para a função antiga
+    ps = periodos_da_pergunta(pergunta, todos)
+    return ps or []
+
+
+def detectar_intencao_bi(pergunta):
+    txt = normalizar_texto(pergunta)
+    if any(x in txt for x in ["COMPAR", "EVOLUCAO", "EVOLUÇÃO", "VARIACAO", "VARIAÇÃO", "MES A MES", "MÊS A MÊS", "HISTORICO", "HISTÓRICO"]):
+        if "PROJETO" in txt or "CLIENTE" in txt:
+            return "analise_projetos"
+        return "comparativo_mensal"
+    if any(x in txt for x in ["DETALH", "ABRA", "ABRIR", "PLANOS DE CONTAS", "POR PLANO", "LANÇAMENT", "LANCAMENT"]):
+        return "detalhamento"
+    if "PROJETO" in txt or ("CLIENTE" in txt and any(x in txt for x in ["MARGEM", "MARKUP", "RECEITA", "CMV", "CUSTO"])):
+        return "analise_projetos"
+    if any(x in txt for x in ["RESUMO EXECUTIVO", "ANALISE GERAL", "ANÁLISE GERAL", "DIRETORIA", "RISCO", "OPORTUNIDADE"]):
+        return "resumo_executivo"
+    if ("RESULTADO" in txt or "LUCRO" in txt) and "DFC" in txt:
+        return "resultado_dfc"
+    if ("RESULTADO" in txt or "LUCRO" in txt) and "DRE" in txt:
+        return "resultado_dre"
+    if any(x in txt for x in ["RECEITA", "FATURAMENTO"]):
+        return "receita"
+    if any(x in txt for x in ["RECEBIMENTO", "RECEBIMENTOS"]):
+        return "recebimento"
+    if any(x in txt for x in ["CMV", "CUSTO"]):
+        return "cmv"
+    if "MARKUP" in txt:
+        return "markup_projetos"
+    return "consulta_livre"
+
+
+def localizar_entidade_bi(pergunta):
+    """Localiza primeiro Conta de Resultado; se não achar, busca Plano de Contas por aproximação."""
+    conta = localizar_conta_resultado_na_pergunta(pergunta)
+    if conta:
+        return {
+            "tipo": "conta_resultado",
+            "titulo": conta,
+            "conta": conta,
+            "planos": [],
+        }
+    planos = localizar_planos_contas_na_pergunta(pergunta, limite=20)
+    if planos:
+        return {
+            "tipo": "plano_contas",
+            "titulo": " + ".join(planos[:3]) + ("..." if len(planos) > 3 else ""),
+            "conta": None,
+            "planos": planos,
+        }
+    return {"tipo": None, "titulo": None, "conta": None, "planos": []}
+
+
+def formatar_df_financeiro(df, colunas_moeda=None, colunas_perc=None):
+    out = df.copy()
+    colunas_moeda = colunas_moeda or []
+    colunas_perc = colunas_perc or []
+    for c in colunas_moeda:
+        if c in out.columns:
+            out[c] = out[c].apply(moeda)
+    for c in colunas_perc:
+        if c in out.columns:
+            out[c] = out[c].apply(perc)
+    return out
+
+
+def montar_comparativo_entidade(entidade, ps):
+    if entidade["tipo"] == "conta_resultado":
+        resumo = resumo_conta_por_periodo(entidade["conta"], ps)
+        dados = confirmadas[
+            (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(entidade["conta"])) &
+            (confirmadas["PERIODO"].isin(ps))
+        ].copy()
+    else:
+        resumo, dados = resumo_plano_por_periodo(entidade["planos"], ps)
+
+    resumo = calcular_variacao_mensal(resumo, "Valor total")
+    resumo = resumo.rename(columns={"Valor total": "Valor"})
+    return resumo, dados
+
+
+def executar_agente_bi(pergunta, periodos_contexto):
+    """Agente de BI sem IA externa: interpreta intenção, extrai parâmetros e calcula com Pandas."""
+    periodos_disponiveis = ordenar_periodos(sorted(
+        set(receita_cmv["PERIODO"].dropna()) |
+        set(recebimentos["PERIODO"].dropna()) |
+        set(confirmadas["PERIODO"].dropna()) |
+        set(projetos_chat["PERIODO"].dropna() if not projetos_chat.empty else [])
+    ))
+    intencao = detectar_intencao_bi(pergunta)
+    ps = intervalo_periodos_por_meses(pergunta, periodos_disponiveis)
+    if not ps:
+        ps = periodos_contexto if periodos_contexto else periodos_disponiveis
+    ps = ordenar_periodos([p for p in ps if p in periodos_disponiveis])
+
+    resultado = {
+        "tipo": "bi",
+        "intencao": intencao,
+        "titulo": "Consulta Gerencial",
+        "texto": "",
+        "metricas": [],
+        "tabelas": [],
+        "graficos": [],
+    }
+
+    if intencao == "comparativo_mensal":
+        entidade = localizar_entidade_bi(pergunta)
+        if not entidade["tipo"]:
+            resultado["titulo"] = "Não localizei a despesa ou plano de contas"
+            resultado["texto"] = "Tente perguntar, por exemplo: **Compare despesas com pessoal de outubro até abril** ou **Compare energia de OUT/25 a ABR/26**."
+            return resultado
+
+        resumo, dados = montar_comparativo_entidade(entidade, ps)
+        total = resumo["Valor"].sum()
+        media = resumo["Valor"].mean() if len(resumo) else 0
+        maior = resumo.sort_values("Valor", ascending=False).iloc[0] if not resumo.empty else None
+        menor = resumo.sort_values("Valor", ascending=True).iloc[0] if not resumo.empty else None
+
+        variacao_total = 0
+        variacao_pct = 0
+        sentido = "estabilidade"
+        if len(resumo) >= 2:
+            ini = resumo.iloc[0]["Valor"]
+            fim = resumo.iloc[-1]["Valor"]
+            variacao_total = fim - ini
+            variacao_pct = variacao_total / ini * 100 if ini else 0
+            sentido = "evolução" if variacao_total > 0 else "queda" if variacao_total < 0 else "estabilidade"
+
+        tabela = resumo.copy()
+        tabela["Variação R$"] = tabela["Variação R$"]
+        tabela["Variação %"] = tabela["Variação %"]
+        tabela_fmt = formatar_df_financeiro(
+            tabela[["PERIODO", "Valor", "Variação R$", "Variação %", "Tendência"]],
+            colunas_moeda=["Valor", "Variação R$"],
+            colunas_perc=["Variação %"]
+        )
+
+        resultado["titulo"] = f"Comparativo mensal — {entidade['titulo']}"
+        resultado["metricas"] = [
+            ("Total no período", moeda(total)),
+            ("Média mensal", moeda(media)),
+            ("Maior mês", f"{maior['PERIODO']} | {moeda(maior['Valor'])}" if maior is not None else "-"),
+            ("Menor mês", f"{menor['PERIODO']} | {moeda(menor['Valor'])}" if menor is not None else "-"),
+        ]
+        resultado["texto"] = (
+            f"Período analisado: **{', '.join(ps)}**. "
+            f"Do primeiro para o último mês houve **{sentido}** de **{moeda(abs(variacao_total))}** ({perc(variacao_pct)}). "
+            f"A leitura deve considerar se a variação representa ganho de eficiência, sazonalidade ou postergação/acúmulo de lançamentos."
+        )
+        resultado["tabelas"].append(("Evolução mês a mês", tabela_fmt))
+        resultado["graficos"].append(("Evolução mensal", resumo[["PERIODO", "Valor"]].copy(), "linha"))
+
+        if not dados.empty:
+            por_plano = dados.groupby("Plano de contas", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False).head(15)
+            por_plano = por_plano.rename(columns={"Valor total": "Valor"})
+            por_plano_fmt = formatar_df_financeiro(por_plano, colunas_moeda=["Valor"])
+            resultado["tabelas"].append(("Principais planos de contas dentro da consulta", por_plano_fmt))
+        return resultado
+
+    if intencao == "detalhamento":
+        entidade = localizar_entidade_bi(pergunta)
+        if not entidade["tipo"]:
+            resultado["titulo"] = "Não localizei a conta para detalhar"
+            resultado["texto"] = "Tente perguntar: **Detalhe despesas com pessoal**, **Detalhe energia** ou **Detalhe aluguel de janeiro a março**."
+            return resultado
+
+        if entidade["tipo"] == "conta_resultado":
+            dados = confirmadas[
+                (confirmadas["CONTA_RESULTADO_NORM"] == normalizar_texto(entidade["conta"])) &
+                (confirmadas["PERIODO"].isin(ps))
+            ].copy()
+        else:
+            dados = confirmadas[
+                (confirmadas["PLANO_NORM"].isin([normalizar_texto(p) for p in entidade["planos"]])) &
+                (confirmadas["PERIODO"].isin(ps))
+            ].copy()
+
+        if dados.empty:
+            resultado["titulo"] = f"Sem lançamentos — {entidade['titulo']}"
+            resultado["texto"] = f"Não encontrei lançamentos para **{entidade['titulo']}** em **{', '.join(ps)}**."
+            return resultado
+
+        resumo = dados.groupby("Plano de contas", as_index=False).agg(Qtd=("Valor total", "count"), Valor=("Valor total", "sum")).sort_values("Valor", ascending=False)
+        total = resumo["Valor"].sum()
+        resumo["% sobre total"] = np.where(total != 0, resumo["Valor"] / total * 100, 0)
+        resumo_fmt = formatar_df_financeiro(resumo, colunas_moeda=["Valor"], colunas_perc=["% sobre total"])
+
+        mensal = dados.groupby("PERIODO", as_index=False)["Valor total"].sum()
+        todos = pd.DataFrame({"PERIODO": ps})
+        mensal = todos.merge(mensal, on="PERIODO", how="left").fillna({"Valor total": 0})
+        mensal = calcular_variacao_mensal(mensal.rename(columns={"Valor total": "Valor"}), "Valor")
+        mensal_fmt = formatar_df_financeiro(mensal[["PERIODO", "Valor", "Variação R$", "Variação %", "Tendência"]], colunas_moeda=["Valor", "Variação R$"], colunas_perc=["Variação %"])
+
+        desc = dados.groupby(["Plano de contas", "Descrição"], as_index=False).agg(Qtd=("Valor total", "count"), Valor=("Valor total", "sum")).sort_values("Valor", ascending=False).head(50)
+        desc_fmt = formatar_df_financeiro(desc, colunas_moeda=["Valor"])
+
+        resultado["titulo"] = f"Detalhamento — {entidade['titulo']}"
+        resultado["metricas"] = [
+            ("Total encontrado", moeda(total)),
+            ("Qtd. lançamentos", f"{len(dados):,}".replace(",", ".")),
+            ("Planos encontrados", resumo["Plano de contas"].nunique()),
+            ("Período", ", ".join(ps)),
+        ]
+        resultado["texto"] = "Abaixo está a abertura por plano de contas, a evolução mensal e os principais lançamentos/descrições encontrados."
+        resultado["tabelas"].append(("Resumo por plano de contas", resumo_fmt))
+        resultado["tabelas"].append(("Evolução mensal", mensal_fmt))
+        resultado["tabelas"].append(("Detalhamento por descrição", desc_fmt))
+        resultado["graficos"].append(("Evolução mensal", mensal[["PERIODO", "Valor"]].copy(), "barra"))
+        return resultado
+
+    if intencao == "analise_projetos":
+        texto = responder_analise_projetos(pergunta, periodos_disponiveis)
+        resultado["titulo"] = "Análise de Projetos"
+        resultado["texto"] = texto
+        return resultado
+
+    # Para demais intenções, usa as rotas objetivas já existentes.
+    resultado["titulo"] = "Resposta gerencial"
+    resultado["texto"] = responder_pergunta_gerencial(pergunta)
+    return resultado
+
+
+def renderizar_resposta_bi(resultado):
+    if isinstance(resultado, str):
+        st.markdown(resultado)
+        return
+
+    st.markdown(f"### {resultado.get('titulo', 'Resposta')}")
+
+    metricas = resultado.get("metricas", [])
+    if metricas:
+        cols = st.columns(min(4, len(metricas)))
+        for i, (nome, valor) in enumerate(metricas):
+            cols[i % len(cols)].metric(str(nome), str(valor))
+
+    texto = resultado.get("texto", "")
+    if texto:
+        st.markdown(texto)
+
+    for titulo, dados, tipo in resultado.get("graficos", []):
+        if isinstance(dados, pd.DataFrame) and not dados.empty and "PERIODO" in dados.columns:
+            st.markdown(f"**{titulo}**")
+            if tipo == "linha":
+                fig = px.line(dados, x="PERIODO", y=dados.columns[-1], markers=True, title=titulo)
+            else:
+                fig = px.bar(dados, x="PERIODO", y=dados.columns[-1], title=titulo)
+            fig.update_layout(xaxis_title="Mês", yaxis_title="Valor")
+            st.plotly_chart(fig, use_container_width=True)
+
+    for titulo, tabela in resultado.get("tabelas", []):
+        st.markdown(f"**{titulo}**")
+        st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+
 periodos = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna())))
 periodos = [p for p in periodos if p and p != "/"]
 
@@ -1500,63 +1857,64 @@ elif pagina == "Projetos":
 
 
 # ============================================================
-# PERGUNTAS E RESPOSTAS
+# PERGUNTAS E RESPOSTAS - AGENTE DE BI
 # ============================================================
 elif pagina == "Perguntas e Respostas":
     st.markdown(
         """
-        <div style="padding:24px;border-radius:18px;background:linear-gradient(135deg,#0B5ED7,#0A2E57);color:white;margin-bottom:18px;">
-            <h1 style="margin:0;font-size:34px;">Perguntas e Respostas Gerenciais</h1>
-            <p style="font-size:17px;margin-top:8px;margin-bottom:0;">
-                Converse com o DRE, DFC, Projetos e Contas de Resultado. O cálculo é feito diretamente na base, com respostas rápidas e gerenciais.
+        <div style="padding:26px;border-radius:20px;background:linear-gradient(135deg,#071E41,#0B5ED7);color:white;margin-bottom:18px;box-shadow:0 8px 22px rgba(0,0,0,.16);">
+            <div style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;opacity:.85;">Última página • BI Conversacional</div>
+            <h1 style="margin:6px 0 0 0;font-size:36px;">Perguntas e Respostas Gerenciais</h1>
+            <p style="font-size:17px;margin-top:10px;margin-bottom:0;max-width:980px;">
+                O agente identifica a intenção da pergunta, localiza conta de resultado ou plano de contas, calcula com Pandas e entrega tabela, gráfico e leitura gerencial.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.caption("Essa página fica por último no menu e funciona como uma camada de consulta rápida sobre os dados do dashboard.")
+    st.caption("Arquitetura: pergunta livre → intenção → parâmetros → cálculo em Pandas → resposta visual.")
 
-    exemplos = gerar_100_exemplos_perguntas()
-
-    cta1, cta2, cta3 = st.columns(3)
-    cta1.metric("Rotas de perguntas", "100+")
-    cta2.metric("Bases consultadas", "DRE | DFC | Projetos")
-    cta3.metric("Modo", "Rápido via Pandas")
+    cta1, cta2, cta3, cta4 = st.columns(4)
+    cta1.metric("Modo", "Agente BI")
+    cta2.metric("Cálculo", "Pandas")
+    cta3.metric("IA externa", "Não usa")
+    cta4.metric("Rotas", "Dinâmicas")
 
     st.info(
-        "Você pode perguntar em linguagem natural. Exemplos: "
-        "'Compare despesas com pessoal de JAN/25 a MAR/25', "
-        "'Detalhe despesas operacionais', ou "
-        "'Faça uma análise dos projetos'."
+        "Exemplos: **Compare despesas com pessoal de outubro até abril**, "
+        "**Compare energia de OUT/25 a ABR/26**, **Detalhe energia**, "
+        "**Detalhe despesas operacionais**, ou **Faça uma análise dos projetos**."
     )
 
-    with st.expander("Ver 100 exemplos de perguntas que o usuário pode fazer", expanded=False):
+    exemplos = gerar_100_exemplos_perguntas()
+    exemplos_extra = [
+        "Compare despesas com pessoal de outubro até abril.",
+        "Compare despesas operacionais de novembro até março.",
+        "Compare energia de outubro até abril.",
+        "Compare aluguel de janeiro até maio.",
+        "Detalhe energia elétrica.",
+        "Detalhe o plano de contas aluguel.",
+        "Detalhe impostos por plano de contas.",
+        "Mostre a evolução de fornecedores de OUT/25 a ABR/26.",
+        "Faça uma análise dos projetos de janeiro até abril.",
+        "Qual foi o resultado DRE de ABR/25?",
+    ]
+    exemplos = exemplos_extra + [e for e in exemplos if e not in exemplos_extra]
+
+    with st.expander("Ver exemplos de perguntas que o usuário pode fazer", expanded=False):
         col_a, col_b = st.columns(2)
-        metade = int(np.ceil(len(exemplos) / 2))
+        metade = int(np.ceil(len(exemplos[:110]) / 2))
         with col_a:
             for i, ex in enumerate(exemplos[:metade], start=1):
                 st.markdown(f"**{i}.** {ex}")
         with col_b:
-            for i, ex in enumerate(exemplos[metade:], start=metade + 1):
+            for i, ex in enumerate(exemplos[metade:110], start=metade + 1):
                 st.markdown(f"**{i}.** {ex}")
-
-    sugestoes = [
-        "Compare despesas com pessoal de JAN/25 a MAR/25.",
-        "Detalhe as despesas operacionais por plano de contas.",
-        "Faça uma análise dos projetos de JAN/25.",
-        "Qual foi o lucro no DRE de ABR/25?",
-        "Qual foi o lucro no DFC de ABR/25?",
-        "Qual foi o markup dos projetos em JAN/25?",
-        "Compare energia de OUT/25 a ABR/26.",
-        "Detalhe energia no período selecionado.",
-        "Compare aluguel de outubro a abril.",
-        "Detalhe o plano de contas Energia elétrica + água.",
-    ]
 
     pergunta_modelo = st.selectbox(
         "Perguntas prontas para testar",
-        options=[""] + sugestoes,
+        options=[""] + exemplos_extra,
         index=0,
         help="Escolha uma pergunta pronta ou digite livremente no chat abaixo."
     )
@@ -1572,21 +1930,24 @@ elif pagina == "Perguntas e Respostas":
 
     if pergunta_modelo:
         if st.button("Enviar pergunta pronta", use_container_width=True):
-            resposta = responder_pergunta_gerencial(pergunta_modelo)
+            resposta = executar_agente_bi(pergunta_modelo, periodos)
             st.session_state.chat_gerencial.append({"role": "user", "content": pergunta_modelo})
             st.session_state.chat_gerencial.append({"role": "assistant", "content": resposta})
             st.rerun()
 
-    pergunta = st.chat_input("Digite sua pergunta sobre DRE, DFC, despesas ou projetos...")
+    pergunta = st.chat_input("Digite sua pergunta sobre DRE, DFC, despesas, planos de contas ou projetos...")
 
     if pergunta:
-        resposta = responder_pergunta_gerencial(pergunta)
+        resposta = executar_agente_bi(pergunta, periodos)
         st.session_state.chat_gerencial.append({"role": "user", "content": pergunta})
         st.session_state.chat_gerencial.append({"role": "assistant", "content": resposta})
 
     for msg in st.session_state.chat_gerencial:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                renderizar_resposta_bi(msg["content"])
+            else:
+                st.markdown(msg["content"])
 
     st.divider()
     st.subheader("Base de referência disponível")
