@@ -500,6 +500,8 @@ PLANILHAS_POSSIVEIS = [
     NOME_PLANILHA,
     "CONTAS A PAGAR SAMUEL ANTUNES(2).xlsx",
     "CONTAS A PAGAR SAMUEL ANTUNES (2).xlsx",
+    "CONTAS A PAGAR SAMUEL ANTUNES(3).xlsx",
+    "CONTAS A PAGAR SAMUEL ANTUNES (3).xlsx",
 ]
 CAMINHO_PLANILHA = None
 for nome_arquivo in PLANILHAS_POSSIVEIS:
@@ -551,12 +553,24 @@ if col_data_venc:
     contas["Data de vencimento"] = pd.to_datetime(contas[col_data_venc], dayfirst=True, errors="coerce")
 else:
     contas["Data de vencimento"] = pd.NaT
+def periodo_por_data(data):
+    if pd.isna(data):
+        return ""
+    try:
+        return f"{MESES_ABREV.get(int(data.month), '')}/{str(int(data.year))[-2:]}"
+    except Exception:
+        return ""
+
+# Período financeiro padrão: confirmados seguem pela Data de confirmação.
 contas["ANO"] = contas["Data de confirmação"].dt.year
 contas["MES_NUM"] = contas["Data de confirmação"].dt.month
-contas["PERIODO"] = contas.apply(
-    lambda r: f"{MESES_ABREV.get(int(r['MES_NUM']), '')}/{str(int(r['ANO']))[-2:]}" if pd.notna(r["MES_NUM"]) and pd.notna(r["ANO"]) else "",
-    axis=1,
-)
+contas["PERIODO_CONFIRMACAO"] = contas["Data de confirmação"].apply(periodo_por_data)
+
+# Período de vencimento: usado para títulos em aberto/atrasados.
+contas["PERIODO_VENCIMENTO"] = contas["Data de vencimento"].apply(periodo_por_data)
+
+# PERIODO geral começa pela confirmação; nos títulos em aberto será trocado para vencimento abaixo.
+contas["PERIODO"] = contas["PERIODO_CONFIRMACAO"]
 contas["PLANO_NORM"] = contas["Plano de contas"].apply(normalizar_texto)
 contas = contas.merge(base[["PLANO_NORM", "CONTA_RESULTADO"]], on="PLANO_NORM", how="left")
 contas["CONTA_RESULTADO"] = contas["CONTA_RESULTADO"].fillna("").astype(str).str.strip()
@@ -603,10 +617,23 @@ lancamentos_manuais = pd.DataFrame([
 contas = pd.concat([contas, lancamentos_manuais], ignore_index=True)
 
 confirmadas = contas[contas["Situação"].apply(normalizar_texto).eq("CONFIRMADO")].copy()
-# Regra operacional: na base da Antunes, todo título com Situação = EM ABERTO deve entrar no drill de atrasados.
+
+# Regra operacional: na base da Antunes, todo título com Situação = EM ABERTO deve entrar
+# no drill de títulos em aberto/atrasados, usando a Data de vencimento como referência do período.
 atrasadas = contas[contas["Situação"].apply(normalizar_texto).eq("EM ABERTO")].copy()
+if not atrasadas.empty:
+    atrasadas["ANO"] = atrasadas["Data de vencimento"].dt.year
+    atrasadas["MES_NUM"] = atrasadas["Data de vencimento"].dt.month
+    atrasadas["PERIODO"] = atrasadas["PERIODO_VENCIMENTO"]
+    # Se por algum motivo não houver vencimento, usa a confirmação apenas como contingência.
+    atrasadas.loc[atrasadas["PERIODO"].eq(""), "PERIODO"] = atrasadas.loc[atrasadas["PERIODO"].eq(""), "PERIODO_CONFIRMACAO"]
+
 # Mostra todos os planos sem Conta de Resultado, inclusive títulos em aberto, para facilitar correção da aba BASE.
 sem_classificacao = contas[contas["CONTA_RESULTADO"].eq("")].copy()
+if not sem_classificacao.empty:
+    mask_aberto_sem_class = sem_classificacao["Situação"].apply(normalizar_texto).eq("EM ABERTO")
+    sem_classificacao.loc[mask_aberto_sem_class, "PERIODO"] = sem_classificacao.loc[mask_aberto_sem_class, "PERIODO_VENCIMENTO"]
+    sem_classificacao.loc[sem_classificacao["PERIODO"].eq(""), "PERIODO"] = sem_classificacao.loc[sem_classificacao["PERIODO"].eq(""), "PERIODO_CONFIRMACAO"]
 
 # Receita / CMV
 col_mes_rc = achar_coluna(receita_cmv, ["MÊS", "MES"])
@@ -2169,7 +2196,7 @@ def renderizar_resposta_bi(resultado, chave_base="resposta"):
         st.dataframe(tabela, use_container_width=True, hide_index=True, key=f"df_bi_{chave_base}_{idx_tabela}")
 
 
-periodos = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna())))
+periodos = ordenar_periodos(sorted(set(receita_cmv["PERIODO"].dropna()) | set(recebimentos["PERIODO"].dropna()) | set(confirmadas["PERIODO"].dropna()) | set(atrasadas["PERIODO"].dropna())))
 periodos = [p for p in periodos if p and p != "/"]
 
 # ============================================================
