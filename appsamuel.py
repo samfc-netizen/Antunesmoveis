@@ -6,7 +6,7 @@ import unicodedata
 from pathlib import Path
 from io import BytesIO
 
-st.set_page_config(page_title="Indicadores Financeiros", layout="wide")
+st.set_page_config(page_title="Antunes Móveis Planejados | Indicadores", layout="wide")
 
 MESES_ORDEM = {
     "JANEIRO": 1, "FEVEREIRO": 2, "MARÇO": 3, "MARCO": 3, "ABRIL": 4,
@@ -234,22 +234,58 @@ def mostrar_drill_conta(df, conta_resultado, periodos, chave_unica=""):
 def mostrar_drill_atrasados(atrasadas):
     st.subheader("Drill de Títulos Atrasados")
     if atrasadas.empty:
-        st.info("Não há títulos atrasados.")
+        st.info("Não há títulos em aberto no período selecionado.")
         return
+
     agrup = atrasadas.groupby(["CONTA_RESULTADO", "Plano de contas"], dropna=False, as_index=False).agg(
         QTD=("Valor total", "count"), VALOR=("Valor total", "sum")
     ).sort_values("VALOR", ascending=False)
     agrup_fmt = agrup.copy()
+    agrup_fmt["CONTA_RESULTADO"] = agrup_fmt["CONTA_RESULTADO"].replace("", "Sem classificação")
     agrup_fmt["VALOR"] = agrup_fmt["VALOR"].apply(moeda)
     st.markdown("**Resumo por Conta de Resultado e Plano de Contas**")
     st.dataframe(agrup_fmt, use_container_width=True, hide_index=True)
 
-    detalhe = atrasadas[["Data de confirmação", "PERIODO", "CONTA_RESULTADO", "Plano de contas", "Descrição", "Valor total", "Situação"]].copy()
-    detalhe["Data de confirmação"] = detalhe["Data de confirmação"].dt.strftime("%d/%m/%Y")
-    detalhe["Valor total"] = detalhe["Valor total"].apply(moeda)
-    st.markdown("**Detalhamento dos títulos**")
+    colunas_base = ["Data de vencimento", "Data de confirmação", "PERIODO", "CONTA_RESULTADO", "Plano de contas", "Descrição", "Valor total", "Situação"]
+    colunas_existentes = [c for c in colunas_base if c in atrasadas.columns]
+    detalhe = atrasadas[colunas_existentes].copy()
+    for col_data in ["Data de vencimento", "Data de confirmação"]:
+        if col_data in detalhe.columns:
+            detalhe[col_data] = pd.to_datetime(detalhe[col_data], errors="coerce").dt.strftime("%d/%m/%Y")
+    if "CONTA_RESULTADO" in detalhe.columns:
+        detalhe["CONTA_RESULTADO"] = detalhe["CONTA_RESULTADO"].replace("", "Sem classificação")
+    if "Valor total" in detalhe.columns:
+        detalhe["Valor total"] = detalhe["Valor total"].apply(moeda)
+    st.markdown("**Detalhamento dos títulos em aberto**")
     st.dataframe(detalhe, use_container_width=True, hide_index=True)
 
+
+def mostrar_planos_sem_classificacao(sem_classificacao_df):
+    st.subheader("Planos de Contas sem Classificação")
+    if sem_classificacao_df.empty:
+        st.success("Não há planos de contas sem classificação no período selecionado.")
+        return
+
+    st.warning("Existem planos de contas sem Conta de Resultado na aba BASE. Classifique esses planos para que entrem corretamente no DRE, DFC e Ponto de Equilíbrio.")
+    resumo = sem_classificacao_df.groupby("Plano de contas", as_index=False).agg(
+        QTD=("Valor total", "count"),
+        VALOR=("Valor total", "sum"),
+    ).sort_values("VALOR", ascending=False)
+    resumo_fmt = resumo.copy()
+    resumo_fmt["VALOR"] = resumo_fmt["VALOR"].apply(moeda)
+    st.markdown("**Resumo dos planos sem classificação**")
+    st.dataframe(resumo_fmt, use_container_width=True, hide_index=True)
+
+    colunas = ["Data de vencimento", "Data de confirmação", "PERIODO", "Plano de contas", "Descrição", "Valor total", "Situação"]
+    colunas = [c for c in colunas if c in sem_classificacao_df.columns]
+    detalhe = sem_classificacao_df[colunas].copy()
+    for col_data in ["Data de vencimento", "Data de confirmação"]:
+        if col_data in detalhe.columns:
+            detalhe[col_data] = pd.to_datetime(detalhe[col_data], errors="coerce").dt.strftime("%d/%m/%Y")
+    if "Valor total" in detalhe.columns:
+        detalhe["Valor total"] = detalhe["Valor total"].apply(moeda)
+    st.markdown("**Lançamentos vinculados a planos sem classificação**")
+    st.dataframe(detalhe, use_container_width=True, hide_index=True)
 
 def mostrar_drill_ajustes_aplicacoes(confirmadas, periodos):
     st.subheader("Drill de Ajustes e Aplicações")
@@ -355,11 +391,103 @@ def botao_pdf_dashboard(nome_arquivo, titulo, subtitulo, kpis, tabela_df, key):
         )
 
 # ============================================================
-# INTERFACE / LEITURA
+# INTERFACE / CAPA / LEITURA
 # ============================================================
 
-st.title("Indicadores Financeiros")
-st.caption("DRE | DFC | Projetos | Ponto de Equilíbrio")
+def mostrar_capa():
+    st.markdown(
+        """
+        <style>
+            .block-container {padding-top: 2rem;}
+            .capa-container {
+                background: linear-gradient(135deg, #0F172A 0%, #1E293B 48%, #334155 100%);
+                border-radius: 28px;
+                padding: 54px 48px;
+                color: white;
+                box-shadow: 0 18px 45px rgba(15, 23, 42, 0.22);
+                margin-bottom: 26px;
+            }
+            .capa-tag {
+                display: inline-block;
+                background: rgba(255,255,255,0.12);
+                border: 1px solid rgba(255,255,255,0.22);
+                border-radius: 999px;
+                padding: 8px 14px;
+                font-size: 13px;
+                letter-spacing: .08em;
+                text-transform: uppercase;
+                margin-bottom: 18px;
+            }
+            .capa-titulo {
+                font-size: 44px;
+                line-height: 1.05;
+                font-weight: 800;
+                margin: 0 0 18px 0;
+            }
+            .capa-texto {
+                font-size: 18px;
+                line-height: 1.55;
+                max-width: 820px;
+                color: #E2E8F0;
+                margin-bottom: 28px;
+            }
+            .capa-card {
+                background: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 18px;
+                padding: 22px;
+                box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
+                height: 100%;
+            }
+            .capa-card h3 {margin-top: 0; color:#0F172A;}
+            .capa-card p {color:#475569;}
+            div.stButton > button {
+                background: #0F172A;
+                color: white;
+                border-radius: 12px;
+                padding: 0.85rem 1.4rem;
+                border: none;
+                font-weight: 700;
+            }
+            div.stButton > button:hover {
+                background: #334155;
+                color: white;
+                border: none;
+            }
+        </style>
+
+        <div class="capa-container">
+            <div class="capa-tag">Dashboard Gerencial</div>
+            <div class="capa-titulo">ANTUNES MÓVEIS PLANEJADOS<br>INDICADORES DE RESULTADO</div>
+            <div class="capa-texto">
+                Painel para acompanhamento financeiro, leitura de DRE, DFC, projetos, ponto de equilíbrio,
+                títulos em aberto e planos de contas pendentes de classificação.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown('<div class="capa-card"><h3>DRE Gerencial</h3><p>Receita, CMV, margem bruta, despesas e resultado econômico.</p></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown('<div class="capa-card"><h3>DFC e Caixa</h3><p>Recebimentos, saídas, fornecedores, resultado de caixa e títulos em aberto.</p></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown('<div class="capa-card"><h3>Gestão de Base</h3><p>Identificação dos planos de contas sem classificação para correção da aba BASE.</p></div>', unsafe_allow_html=True)
+
+    st.write("")
+    if st.button("Iniciar análise", use_container_width=True):
+        st.session_state["app_iniciado"] = True
+        st.rerun()
+
+
+if not st.session_state.get("app_iniciado", False):
+    mostrar_capa()
+    st.stop()
+
+st.title("ANTUNES MÓVEIS PLANEJADOS - INDICADORES DE RESULTADO")
+st.caption("DRE | DFC | Projetos | Ponto de Equilíbrio | Perguntas e Respostas")
 
 # ============================================================
 # LEITURA AUTOMÁTICA DA PLANILHA
@@ -368,12 +496,23 @@ st.caption("DRE | DFC | Projetos | Ponto de Equilíbrio")
 # ============================================================
 
 NOME_PLANILHA = "CONTAS A PAGAR SAMUEL ANTUNES.xlsx"
-CAMINHO_PLANILHA = Path(__file__).parent / NOME_PLANILHA
+PLANILHAS_POSSIVEIS = [
+    NOME_PLANILHA,
+    "CONTAS A PAGAR SAMUEL ANTUNES(2).xlsx",
+    "CONTAS A PAGAR SAMUEL ANTUNES (2).xlsx",
+]
+CAMINHO_PLANILHA = None
+for nome_arquivo in PLANILHAS_POSSIVEIS:
+    caminho_teste = Path(__file__).parent / nome_arquivo
+    if caminho_teste.exists():
+        CAMINHO_PLANILHA = caminho_teste
+        NOME_PLANILHA = nome_arquivo
+        break
 
-if not CAMINHO_PLANILHA.exists():
+if CAMINHO_PLANILHA is None:
     st.error(
-        f"Planilha não encontrada: {NOME_PLANILHA}. "
-        "Coloque o arquivo Excel na mesma pasta/repositório deste app.py."
+        "Planilha não encontrada. Coloque o arquivo Excel na mesma pasta/repositório deste app.py "
+        "com o nome CONTAS A PAGAR SAMUEL ANTUNES.xlsx."
     )
     st.stop()
 
@@ -394,6 +533,7 @@ base = preparar_base(base_raw)
 # Contas a pagar
 col_plano = achar_coluna(contas, ["Plano de contas"])
 col_data_conf = achar_coluna(contas, ["Data de confirmação"])
+col_data_venc = achar_coluna(contas, ["Data de vencimento"])
 col_situacao = achar_coluna(contas, ["Situação", "Situacao"])
 col_valor_total = achar_coluna(contas, ["Valor total"])
 col_descricao = achar_coluna(contas, ["Descrição", "Descricao"])
@@ -407,6 +547,10 @@ contas["Descrição"] = contas[col_descricao].astype(str).str.strip()
 contas["Situação"] = contas[col_situacao].astype(str).str.strip()
 contas["Valor total"] = converter_numero_br(contas[col_valor_total])
 contas["Data de confirmação"] = pd.to_datetime(contas[col_data_conf], dayfirst=True, errors="coerce")
+if col_data_venc:
+    contas["Data de vencimento"] = pd.to_datetime(contas[col_data_venc], dayfirst=True, errors="coerce")
+else:
+    contas["Data de vencimento"] = pd.NaT
 contas["ANO"] = contas["Data de confirmação"].dt.year
 contas["MES_NUM"] = contas["Data de confirmação"].dt.month
 contas["PERIODO"] = contas.apply(
@@ -432,6 +576,7 @@ lancamentos_manuais = pd.DataFrame([
         "Situação": "Confirmado",
         "Valor total": 37247.26,
         "Data de confirmação": pd.Timestamp(2025, 10, 31),
+        "Data de vencimento": pd.Timestamp(2025, 10, 31),
         "ANO": 2025,
         "MES_NUM": 10,
         "PERIODO": "OUT/25",
@@ -445,6 +590,7 @@ lancamentos_manuais = pd.DataFrame([
         "Situação": "Confirmado",
         "Valor total": 15609.85,
         "Data de confirmação": pd.Timestamp(2025, 11, 30),
+        "Data de vencimento": pd.Timestamp(2025, 11, 30),
         "ANO": 2025,
         "MES_NUM": 11,
         "PERIODO": "NOV/25",
@@ -457,8 +603,10 @@ lancamentos_manuais = pd.DataFrame([
 contas = pd.concat([contas, lancamentos_manuais], ignore_index=True)
 
 confirmadas = contas[contas["Situação"].apply(normalizar_texto).eq("CONFIRMADO")].copy()
-atrasadas = contas[contas["Situação"].apply(normalizar_texto).str.contains("ATRAS", na=False)].copy()
-sem_classificacao = confirmadas[confirmadas["CONTA_RESULTADO"].eq("")].copy()
+# Regra operacional: na base da Antunes, todo título com Situação = EM ABERTO deve entrar no drill de atrasados.
+atrasadas = contas[contas["Situação"].apply(normalizar_texto).eq("EM ABERTO")].copy()
+# Mostra todos os planos sem Conta de Resultado, inclusive títulos em aberto, para facilitar correção da aba BASE.
+sem_classificacao = contas[contas["CONTA_RESULTADO"].eq("")].copy()
 
 # Receita / CMV
 col_mes_rc = achar_coluna(receita_cmv, ["MÊS", "MES"])
@@ -2049,7 +2197,7 @@ sem_classificacao_periodo = sem_classificacao[sem_classificacao["PERIODO"].isin(
 receita_cmv_periodo = receita_cmv[receita_cmv["PERIODO"].isin(periodos)].copy()
 recebimentos_periodo_df = recebimentos[recebimentos["PERIODO"].isin(periodos)].copy()
 
-pagina = st.sidebar.radio("Multipages", ["DRE", "DFC", "Projetos", "Ponto de Equilíbrio", "Perguntas e Respostas"])
+pagina = st.sidebar.radio("Menu", ["DRE", "DFC", "Projetos", "Ponto de Equilíbrio", "Perguntas e Respostas"])
 
 # ============================================================
 # DRE
@@ -2131,17 +2279,14 @@ if pagina == "DRE":
 
     st.subheader("Observações")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Títulos atrasados", len(atrasadas_periodo))
-    c2.metric("Valor atrasado", moeda(atrasadas_periodo["Valor total"].sum()))
+    c1.metric("Títulos em aberto / atrasados", len(atrasadas_periodo))
+    c2.metric("Valor em aberto", moeda(atrasadas_periodo["Valor total"].sum()))
     c3.metric("Planos sem classificação", sem_classificacao_periodo["Plano de contas"].nunique())
 
-    if not sem_classificacao_periodo.empty:
-        st.warning("Existem planos de contas sem Conta de Resultado na aba BASE.")
-        sem = sem_classificacao_periodo.groupby("Plano de contas", as_index=False)["Valor total"].sum().sort_values("Valor total", ascending=False)
-        sem["Valor total"] = sem["Valor total"].apply(moeda)
-        st.dataframe(sem, use_container_width=True, hide_index=True)
+    with st.expander("Ver planos de contas sem classificação", expanded=False):
+        mostrar_planos_sem_classificacao(sem_classificacao_periodo)
 
-    with st.expander("Ver drill dos títulos atrasados", expanded=False):
+    with st.expander("Ver drill dos títulos em aberto / atrasados", expanded=False):
         mostrar_drill_atrasados(atrasadas_periodo)
 
     with st.expander("Ver drill de Ajustes e Aplicações", expanded=False):
@@ -2219,10 +2364,13 @@ elif pagina == "DFC":
 
     st.subheader("Observações")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Títulos atrasados", len(atrasadas_periodo))
-    c2.metric("Valor atrasado", moeda(atrasadas_periodo["Valor total"].sum()))
+    c1.metric("Títulos em aberto / atrasados", len(atrasadas_periodo))
+    c2.metric("Valor em aberto", moeda(atrasadas_periodo["Valor total"].sum()))
     c3.metric("Planos sem classificação", sem_classificacao_periodo["Plano de contas"].nunique())
-    with st.expander("Ver drill dos títulos atrasados", expanded=False):
+    with st.expander("Ver planos de contas sem classificação", expanded=False):
+        mostrar_planos_sem_classificacao(sem_classificacao_periodo)
+
+    with st.expander("Ver drill dos títulos em aberto / atrasados", expanded=False):
         mostrar_drill_atrasados(atrasadas_periodo)
 
     with st.expander("Ver drill de Ajustes e Aplicações", expanded=False):
