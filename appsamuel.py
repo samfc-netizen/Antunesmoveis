@@ -228,6 +228,64 @@ def formatar_pivot_valores(pivot, periodos):
     return out
 
 
+def adicionar_painel_variacao(pivot, periodos):
+    """Adiciona alertas por linha quando algum mês supera a média dos meses com movimento."""
+    if pivot.empty:
+        return pivot.copy()
+
+    out = pivot.copy()
+    status_lista = []
+    desvio_lista = []
+    meses_alerta_lista = []
+
+    for _, linha in out.iterrows():
+        valores = pd.to_numeric(linha[periodos], errors="coerce").fillna(0)
+        valores_com_movimento = valores[valores != 0]
+
+        if valores_com_movimento.empty:
+            status_lista.append("🟢 Normal")
+            desvio_lista.append(0.0)
+            meses_alerta_lista.append("")
+            continue
+
+        media = valores_com_movimento.mean()
+        if media == 0:
+            status_lista.append("🟢 Normal")
+            desvio_lista.append(0.0)
+            meses_alerta_lista.append("")
+            continue
+
+        variacoes = ((valores - media) / abs(media)) * 100
+        meses_acima_20 = [p for p in periodos if valores[p] != 0 and variacoes[p] > 20]
+        maior_desvio = max([variacoes[p] for p in periodos if valores[p] != 0], default=0.0)
+
+        if maior_desvio > 35:
+            status = "🚨 Verificar"
+        elif maior_desvio > 20:
+            status = "🟡 Oscilação"
+        else:
+            status = "🟢 Normal"
+
+        status_lista.append(status)
+        desvio_lista.append(float(max(maior_desvio, 0)))
+        meses_alerta_lista.append(", ".join(meses_acima_20))
+
+    out.insert(0, "Status", status_lista)
+    out["Maior aumento vs. média"] = desvio_lista
+    out["Meses acima de 20%"] = meses_alerta_lista
+    return out
+
+
+def formatar_painel_variacao(pivot, periodos):
+    out = pivot.copy()
+    for c in periodos + ["TOTAL"]:
+        if c in out.columns:
+            out[c] = out[c].apply(moeda)
+    if "Maior aumento vs. média" in out.columns:
+        out["Maior aumento vs. média"] = out["Maior aumento vs. média"].apply(perc)
+    return out
+
+
 def mostrar_drill_conta(df, conta_resultado, periodos, chave_unica=""):
     dados = df[df["CONTA_RESULTADO_NORM"] == normalizar_texto(conta_resultado)].copy()
     if dados.empty:
@@ -236,7 +294,9 @@ def mostrar_drill_conta(df, conta_resultado, periodos, chave_unica=""):
 
     st.markdown("**Consolidado por Plano de Contas**")
     consolidado = montar_pivot(dados, ["Plano de contas"], periodos)
-    st.dataframe(formatar_pivot_valores(consolidado, periodos), use_container_width=True, hide_index=True)
+    painel_consolidado = adicionar_painel_variacao(consolidado, periodos)
+    st.caption("🟢 Normal: até 20% | 🟡 Oscilação: acima de 20% até 35% | 🚨 Verificar: acima de 35% da média dos meses com movimento")
+    st.dataframe(formatar_painel_variacao(painel_consolidado, periodos), use_container_width=True, hide_index=True)
 
     st.markdown("**Detalhamento por descrição dentro do Plano de Contas**")
     planos = consolidado["Plano de contas"].tolist() if not consolidado.empty else sorted(dados["Plano de contas"].dropna().unique())
