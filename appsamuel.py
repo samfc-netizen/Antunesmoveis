@@ -24,6 +24,20 @@ def normalizar_texto(txt):
     return " ".join(txt.upper().split())
 
 
+def consolidar_descricao_parcelada(descricao):
+    """Remove apenas o indicador de parcela final, como (1/5), (2/5) etc.
+
+    Assim, lançamentos da mesma origem ficam consolidados em uma única linha,
+    sem alterar descrições que não tenham esse padrão no final.
+    """
+    if pd.isna(descricao):
+        return ""
+    import re
+    texto = str(descricao).strip()
+    texto = re.sub(r"\s*\(\s*\d+\s*/\s*\d+\s*\)\s*$", "", texto)
+    return " ".join(texto.split()).strip()
+
+
 def moeda(v):
     try:
         v = float(v)
@@ -227,7 +241,10 @@ def mostrar_drill_conta(df, conta_resultado, periodos, chave_unica=""):
     st.markdown("**Detalhamento por descrição dentro do Plano de Contas**")
     planos = consolidado["Plano de contas"].tolist() if not consolidado.empty else sorted(dados["Plano de contas"].dropna().unique())
     plano_sel = st.selectbox("Selecione o Plano de Contas para detalhar", planos, key=f"plano_{chave_unica}_{normalizar_texto(conta_resultado)}")
-    detalhado = montar_pivot(dados[dados["Plano de contas"] == plano_sel], ["Plano de contas", "Descrição"], periodos)
+    dados_plano = dados[dados["Plano de contas"] == plano_sel].copy()
+    dados_plano["Descrição consolidada"] = dados_plano["Descrição"].apply(consolidar_descricao_parcelada)
+    detalhado = montar_pivot(dados_plano, ["Plano de contas", "Descrição consolidada"], periodos)
+    detalhado = detalhado.rename(columns={"Descrição consolidada": "Descrição"})
     st.dataframe(formatar_pivot_valores(detalhado, periodos), use_container_width=True, hide_index=True)
 
 
@@ -546,6 +563,7 @@ if not all([col_plano, col_data_conf, col_situacao, col_valor_total, col_descric
 
 contas["Plano de contas"] = contas[col_plano].astype(str).str.strip()
 contas["Descrição"] = contas[col_descricao].astype(str).str.strip()
+contas["Descrição consolidada"] = contas["Descrição"].apply(consolidar_descricao_parcelada)
 contas["Situação"] = contas[col_situacao].astype(str).str.strip()
 contas["Valor total"] = converter_numero_br(contas[col_valor_total])
 contas["Data de confirmação"] = pd.to_datetime(contas[col_data_conf], dayfirst=True, errors="coerce")
@@ -615,6 +633,7 @@ lancamentos_manuais = pd.DataFrame([
 ])
 
 contas = pd.concat([contas, lancamentos_manuais], ignore_index=True)
+contas["Descrição consolidada"] = contas["Descrição"].apply(consolidar_descricao_parcelada)
 
 confirmadas = contas[contas["Situação"].apply(normalizar_texto).eq("CONFIRMADO")].copy()
 
@@ -1067,10 +1086,12 @@ def responder_detalhamento_conta(pergunta, periodos_disponiveis):
     mensal_fmt["Variação %"] = mensal_fmt["Variação %"].apply(perc)
     mensal_fmt = mensal_fmt[["PERIODO", "Valor", "Variação R$", "Variação %", "Tendência"]]
 
-    descricoes = dados.groupby(["Plano de contas", "Descrição"], as_index=False).agg(
+    dados["Descrição consolidada"] = dados["Descrição"].apply(consolidar_descricao_parcelada)
+    descricoes = dados.groupby(["Plano de contas", "Descrição consolidada"], as_index=False).agg(
         Qtd=("Valor total", "count"),
         Valor=("Valor total", "sum")
     ).sort_values("Valor", ascending=False).head(30)
+    descricoes = descricoes.rename(columns={"Descrição consolidada": "Descrição"})
     descricoes_fmt = descricoes.copy()
     descricoes_fmt["Valor"] = descricoes_fmt["Valor"].apply(moeda)
 
@@ -2313,7 +2334,7 @@ if pagina == "DRE":
     with st.expander("Ver planos de contas sem classificação", expanded=False):
         mostrar_planos_sem_classificacao(sem_classificacao_periodo)
 
-    with st.expander("Ver drill dos títulos em aberto / atrasados", expanded=False):
+    with st.expander(":red[🚨 Ver drill dos títulos em aberto / atrasados]", expanded=False):
         mostrar_drill_atrasados(atrasadas_periodo)
 
     with st.expander("Ver drill de Ajustes e Aplicações", expanded=False):
@@ -2397,7 +2418,7 @@ elif pagina == "DFC":
     with st.expander("Ver planos de contas sem classificação", expanded=False):
         mostrar_planos_sem_classificacao(sem_classificacao_periodo)
 
-    with st.expander("Ver drill dos títulos em aberto / atrasados", expanded=False):
+    with st.expander(":red[🚨 Ver drill dos títulos em aberto / atrasados]", expanded=False):
         mostrar_drill_atrasados(atrasadas_periodo)
 
     with st.expander("Ver drill de Ajustes e Aplicações", expanded=False):
