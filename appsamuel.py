@@ -114,6 +114,24 @@ def aplicar_layout_software():
             [data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button {
                 width:100%; background:#F8FAFC !important; color:#111214 !important; border:none !important;
             }
+            /* Controles claros da sidebar: texto escuro para manter contraste */
+            [data-testid="stSidebar"] [data-baseweb="select"] > div {
+                background:#FFFFFF !important;
+                color:#111827 !important;
+                border-color:#D0D5DD !important;
+            }
+            [data-testid="stSidebar"] [data-baseweb="select"] span,
+            [data-testid="stSidebar"] [data-baseweb="select"] input,
+            [data-testid="stSidebar"] [data-baseweb="select"] svg {
+                color:#111827 !important;
+                fill:#667085 !important;
+                -webkit-text-fill-color:#111827 !important;
+            }
+            [data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button *,
+            [data-testid="stSidebar"] [data-testid="stFormSubmitButton"] button p {
+                color:#111214 !important;
+                -webkit-text-fill-color:#111214 !important;
+            }
             [data-testid="stSidebar"] [role="radiogroup"] label {
                 padding:7px 8px; border-radius:8px;
             }
