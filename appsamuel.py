@@ -565,6 +565,7 @@ def mostrar_drill_ajustes_aplicacoes(confirmadas, periodos):
 
 
 
+@st.cache_data(show_spinner=False)
 def gerar_pdf_dashboard(titulo, subtitulo, kpis, tabela_df):
     """Gera um PDF simples com KPIs e a tabela principal do dashboard."""
     try:
@@ -770,12 +771,23 @@ if CAMINHO_PLANILHA is None:
     st.stop()
 
 st.markdown(f'<div class="data-status">● Base carregada automaticamente &nbsp;•&nbsp; {NOME_PLANILHA}</div>', unsafe_allow_html=True)
-xls = pd.ExcelFile(CAMINHO_PLANILHA)
-contas = pd.read_excel(xls, "relatorio_contas_pagar")
-base_raw = pd.read_excel(xls, "BASE", header=None)
-receita_cmv = pd.read_excel(xls, "RECEITA E CMV")
-recebimentos = pd.read_excel(xls, "RECEBIMENTO")
-projetos = pd.read_excel(xls, "PROJETOS")
+
+# Cache da leitura do Excel: trocar filtros não deve reler o arquivo inteiro.
+# O mtime entra na chave para o cache ser invalidado automaticamente quando a planilha for atualizada.
+@st.cache_data(show_spinner=False)
+def carregar_planilha_cache(caminho_str, modificado_em):
+    with pd.ExcelFile(caminho_str) as xls:
+        contas_df = pd.read_excel(xls, "relatorio_contas_pagar")
+        base_df = pd.read_excel(xls, "BASE", header=None)
+        receita_cmv_df = pd.read_excel(xls, "RECEITA E CMV")
+        recebimentos_df = pd.read_excel(xls, "RECEBIMENTO")
+        projetos_df = pd.read_excel(xls, "PROJETOS")
+    return contas_df, base_df, receita_cmv_df, recebimentos_df, projetos_df
+
+_mtime_planilha = CAMINHO_PLANILHA.stat().st_mtime
+contas, base_raw, receita_cmv, recebimentos, projetos = carregar_planilha_cache(
+    str(CAMINHO_PLANILHA), _mtime_planilha
+)
 
 contas.columns = [str(c).strip() for c in contas.columns]
 receita_cmv.columns = [str(c).strip() for c in receita_cmv.columns]
@@ -2514,12 +2526,13 @@ if atualizar:
     if not meses_input:
         st.sidebar.error("Marque pelo menos um mês.")
     else:
+        # O clique no submit já provoca um único rerun do Streamlit.
+        # Não chamamos st.rerun() novamente: os novos filtros são aplicados nesta mesma execução.
         st.session_state["filtro_ano_aplicado"] = int(ano_sel)
-        st.session_state["filtro_meses_aplicados"] = meses_input
-        st.rerun()
+        st.session_state["filtro_meses_aplicados"] = list(meses_input)
 
-ano_aplicado = st.session_state["filtro_ano_aplicado"]
-meses_aplicados = st.session_state["filtro_meses_aplicados"]
+ano_aplicado = int(st.session_state["filtro_ano_aplicado"])
+meses_aplicados = list(st.session_state["filtro_meses_aplicados"])
 # Mapeia JAN/FEV/... diretamente para o número do mês.
 _abrev_para_num = {v: k for k, v in MESES_ABREV.items()}
 periodos_filtrados = [
