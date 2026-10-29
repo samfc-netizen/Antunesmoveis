@@ -779,9 +779,10 @@ def carregar_planilha_cache(caminho_str, modificado_em):
     with pd.ExcelFile(caminho_str) as xls:
         contas_df = pd.read_excel(xls, "relatorio_contas_pagar")
         base_df = pd.read_excel(xls, "BASE", header=None)
-        receita_cmv_df = pd.read_excel(xls, "RECEITA E CMV")
         recebimentos_df = pd.read_excel(xls, "RECEBIMENTO")
         projetos_df = pd.read_excel(xls, "PROJETOS")
+        # Fonte única de Receita e CMV: cada linha da aba PROJETOS.
+        receita_cmv_df = projetos_df.copy()
     return contas_df, base_df, receita_cmv_df, recebimentos_df, projetos_df
 
 _mtime_planilha = CAMINHO_PLANILHA.stat().st_mtime
@@ -906,7 +907,7 @@ col_ano_rc = achar_coluna(receita_cmv, ["ANO"])
 col_receita = achar_coluna(receita_cmv, ["RECEITA"])
 col_cmv = achar_coluna(receita_cmv, ["CMV"])
 if not all([col_mes_rc, col_ano_rc, col_receita, col_cmv]):
-    st.error("Não consegui localizar MÊS, ANO, RECEITA e CMV na aba RECEITA E CMV.")
+    st.error("Não consegui localizar MÊS, ANO, RECEITA e CMV na aba PROJETOS.")
     st.write(list(receita_cmv.columns))
     st.stop()
 receita_cmv["PERIODO"] = receita_cmv.apply(lambda r: mes_ano_label(r[col_mes_rc], r[col_ano_rc]), axis=1)
